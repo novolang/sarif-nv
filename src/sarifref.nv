@@ -1,0 +1,263 @@
+// sarifref.nv — the load-bearing interface: a result names an artifact
+// and a rule by INDEX, and the index is a type.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE IDEA, AND IT IS A NEGATIVE ONE.  A SARIF result does NOT carry
+// the path of the file it is about.  It carries an index into
+// `run.artifacts`, and the artifact at that index carries the URI.  The
+// same is true of the rule: a result carries a `ruleIndex` into
+// `tool.driver.rules`, where the identifier, the help text and the
+// default level live.
+//
+// That indirection is the whole reason SARIF is a format a compiler can
+// emit for a project rather than one diagnostic at a time.  Ten
+// thousand findings over two hundred files carry two hundred URIs; ten
+// thousand findings under forty rules carry forty help texts.  An
+// emitter that repeated the URI per result produces a document that
+// validates, means the same thing, and is many times the size — which
+// is how a continuous-integration upload starts being refused for size,
+// and is the single most common way a hand-rolled SARIF writer goes
+// wrong.
+//
+// SO THE INDEX IS A TYPE AND NOT AN `Int`.  `SarifArtifactRef` and
+// `SarifRuleRef` hold one integer each, and `sarifbuild` — the module
+// that owns the tables — is the only place either is produced.  A
+// caller therefore cannot write a result naming artifact seven of a run
+// that has three artifacts: the only way to get a ref is to intern a
+// URI, and interning is what fills the table.  An `Int` in those fields
+// would have made the package's central invariant a convention.
+//
+// THE SECOND THING THIS MODULE EXISTS FOR is `level_ok`.  SARIF § 3.27.10
+// makes `level` meaningful only for a result whose `kind` is `fail`;
+// every other kind must carry `SarifLevelNone`.  Emitters break that
+// rule constantly, and the consequence is not a validation error a
+// person sees — it is a `pass` result with `level: "error"` reported as
+// a failure by a consumer that read one field and not the other.
+
+// A reference to one artifact of a run.
+//
+// One integer, and no constructor outside `sarifbuild`.  The type
+// existing rather than an `Int` is this package's design.
+pub struct SarifArtifactRef
+    index: Int
+
+// A reference to one rule of one tool component.
+//
+// `component` is 0 for the driver and 1-based into `tool.extensions`
+// for anything else, because a result's rule index is relative to the
+// component its `toolComponent` reference names — a plugin's rule 3 and
+// the driver's rule 3 are two rules.
+pub struct SarifRuleRef
+    component: Int
+    index: Int
+
+// A reference to one logical location of a run.
+pub struct SarifLogicalRef
+    index: Int
+
+// How serious a result is.
+//
+// `SarifLevelNone` is the level a result of a non-failing kind must
+// carry.  See the module header.
+pub enum SarifLevel
+    SarifLevelNone
+    SarifLevelNote
+    SarifLevelWarning
+    SarifLevelError
+
+// What a result IS, which is a different question from how serious it
+// is.
+//
+// Most tools only ever emit `SarifKindFail`, and the other five exist
+// because a log that records what PASSED is the log a baseline
+// comparison needs: a rule that stopped reporting because it stopped
+// running looks exactly like a rule whose findings were fixed, unless
+// the passes are in the document.
+pub enum SarifKind
+    // The rule was violated.  The only kind for which `level` means
+    // anything.
+    SarifKindFail
+    // The rule was evaluated and not violated.
+    SarifKindPass
+    // The tool could not decide.
+    SarifKindOpen
+    // A person has to decide.
+    SarifKindReview
+    // The rule does not apply to this artifact.
+    SarifKindNotApplicable
+    // Something worth saying that is not a judgement.
+    SarifKindInformational
+
+// Whether a result has been seen before.
+//
+// The field a gate acts on: a pipeline that fails on `SarifBaselineNew`
+// and reports `SarifBaselineUnchanged` is a pipeline a team can adopt
+// on a codebase that already has findings, and one that fails on
+// everything is a pipeline they turn off.
+pub enum SarifBaseline
+    // Not in the baseline.
+    SarifBaselineNew
+    // In the baseline, unchanged.
+    SarifBaselineUnchanged
+    // In the baseline, but something about it moved.
+    SarifBaselineUpdated
+    // In the baseline and not in this run.
+    SarifBaselineAbsent
+
+// Who decided a result should not be reported, and how.
+pub enum SarifSuppressionKind
+    // A person marked it, outside the source.
+    SarifSuppressionExternal
+    // The source says so — a comment, an annotation.
+    SarifSuppressionInSource
+
+// Whether a suppression is in force.
+//
+// SARIF's `status`, and the reason it is not a boolean: a suppression
+// somebody has requested and nobody has approved is a finding that
+// still counts, and a consumer that read `suppressions != []` as
+// "suppressed" would have hidden it.
+pub enum SarifSuppressionStatus
+    SarifSuppressionAccepted
+    SarifSuppressionUnderReview
+    SarifSuppressionRejected
+
+// One entry of a property bag.
+//
+// SARIF's `properties` is an arbitrary JSON object, and that is what it
+// is here: a name and a `JsonValueH`.  Modelling it as a typed struct
+// would have closed the one field the format leaves open.
+pub struct SarifProperty
+    name: Str
+    value: JsonValueH
+
+// ── Names, both ways ─────────────────────────────────────────────────
+//
+// Every enum above has a spelling in the document and every spelling
+// has to survive a round trip, so each has a pair here.  The
+// `from_name` half answers `None` rather than a default for anything
+// else, because a log carrying `level: "fatal"` was written by
+// something that is not a SARIF producer, and reading it as `error`
+// hides that.
+
+// A level in SARIF's own spelling: `none`, `note`, `warning`, `error`.
+//
+// ```novo
+// use sarifref
+//
+// fn main() [io]
+//     println(sarifref.level_name(SarifLevelWarning))
+// ```
+pub fn level_name(l: SarifLevel) -> Str []
+    todo("sarif-nv.sarifref.level_name")
+
+// A level from SARIF's spelling, or `None` for anything else.
+pub fn level_from_name(s: Str) -> ?SarifLevel []
+    todo("sarif-nv.sarifref.level_from_name")
+
+// A kind in SARIF's own spelling: `fail`, `pass`, `open`, `review`,
+// `notApplicable`, `informational`.
+pub fn kind_name(k: SarifKind) -> Str []
+    todo("sarif-nv.sarifref.kind_name")
+
+// A kind from SARIF's spelling, or `None`.
+pub fn kind_from_name(s: Str) -> ?SarifKind []
+    todo("sarif-nv.sarifref.kind_from_name")
+
+// A baseline state in SARIF's own spelling: `new`, `unchanged`,
+// `updated`, `absent`.
+pub fn baseline_name(b: SarifBaseline) -> Str []
+    todo("sarif-nv.sarifref.baseline_name")
+
+// A baseline state from SARIF's spelling, or `None`.
+pub fn baseline_from_name(s: Str) -> ?SarifBaseline []
+    todo("sarif-nv.sarifref.baseline_from_name")
+
+// A suppression kind in SARIF's own spelling: `external`, `inSource`.
+pub fn suppression_kind_name(k: SarifSuppressionKind) -> Str []
+    todo("sarif-nv.sarifref.suppression_kind_name")
+
+// A suppression status in SARIF's own spelling: `accepted`,
+// `underReview`, `rejected`.
+pub fn suppression_status_name(s: SarifSuppressionStatus) -> Str []
+    todo("sarif-nv.sarifref.suppression_status_name")
+
+// ── The rule the format states and emitters break ────────────────────
+
+// Whether a kind and a level may appear together.
+//
+// SARIF § 3.27.10: `level` is meaningful only when `kind` is `fail`,
+// and every other kind must carry `SarifLevelNone`.  A `pass` result
+// with `level: "error"` is invalid, and the damage is not the
+// validation failure — it is the consumer that reads one field and not
+// the other and reports a passing check as a failure.
+//
+// ```novo
+// use sarifref
+//
+// fn main() [io]
+//     println("${sarifref.level_ok(SarifKindPass, SarifLevelError)}")
+// ```
+pub fn level_ok(k: SarifKind, l: SarifLevel) -> Bool []
+    todo("sarif-nv.sarifref.level_ok")
+
+// The level a kind admits, for a caller that would rather be corrected
+// than refused.
+//
+// The identity for `SarifKindFail` and `SarifLevelNone` for everything
+// else.  `sarifbuild` calls it; a caller that wants the refusal instead
+// calls `level_ok` first.
+pub fn level_for_kind(k: SarifKind, l: SarifLevel) -> SarifLevel []
+    todo("sarif-nv.sarifref.level_for_kind")
+
+// ── Refs ─────────────────────────────────────────────────────────────
+
+// Whether a ref stands for nothing.
+//
+// The absent ref is index -1, which is what a result with no artifact
+// carries — a rule about the project as a whole, a finding in a
+// generated file the tool never read.
+pub fn ref_absent(a: SarifArtifactRef) -> Bool []
+    todo("sarif-nv.sarifref.ref_absent")
+
+// The ref that stands for nothing.
+pub fn no_artifact() -> SarifArtifactRef []
+    todo("sarif-nv.sarifref.no_artifact")
+
+// The rule ref that stands for nothing.
+//
+// A result with no rule is legal — SARIF allows a `message` with no
+// `ruleId` — and is what a tool emits for a crash it wants in the log.
+pub fn no_rule() -> SarifRuleRef []
+    todo("sarif-nv.sarifref.no_rule")
+
+// Whether a rule ref stands for nothing.
+pub fn rule_ref_absent(r: SarifRuleRef) -> Bool []
+    todo("sarif-nv.sarifref.rule_ref_absent")
+
+// Whether two rule refs name the same rule of the same component.
+pub fn rule_ref_eq(a: SarifRuleRef, b: SarifRuleRef) -> Bool []
+    todo("sarif-nv.sarifref.rule_ref_eq")
+
+// ── Property bags ────────────────────────────────────────────────────
+
+// A property's value by name, or `None`.
+pub fn property(ps: [SarifProperty], name: Str) -> ?JsonValueH []
+    todo("sarif-nv.sarifref.property")
+
+// A property bag with one name set, replacing any entry of that name.
+//
+// Answers a new list: nothing here mutates, because `[mutate]` is a
+// host effect and this package is `core`.
+pub fn with_property(ps: [SarifProperty], name: Str, value: JsonValueH) -> [SarifProperty] []
+    todo("sarif-nv.sarifref.with_property")
+
+// The `tags` array SARIF conventionally puts in a property bag, or an
+// empty list.
+//
+// A named call because `tags` is the one property the format's own
+// consumers read: code-scanning services categorise a rule by it, and a
+// tool that put its tags anywhere else has rules nothing can group.
+pub fn property_tags(ps: [SarifProperty]) -> [Str] []
+    todo("sarif-nv.sarifref.property_tags")

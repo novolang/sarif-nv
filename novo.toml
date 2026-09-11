@@ -1,0 +1,57 @@
+[package]
+name        = "sarif-nv"
+version     = "0.0.1"
+description = "SARIF 2.1.0 as a typed value: runs, the tool and its rules, results with locations, regions, code flows, fixes and suppressions, written to and read from the standard library's JSON value.  A location names an artifact by INDEX into the run's own table, and the builder is what makes that index the only way to name one — so a run of ten thousand findings over two hundred files carries two hundred URIs.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`.  A SARIF log is a value the caller assembles out of
+# diagnostics it already holds, and writing one is a conversion to the
+# standard library's JSON value: nothing is read, no file is opened, no
+# clock is consulted.  The `invocation` timestamps a real analysis tool
+# records arrive as arguments, which is what keeps the package `[]` and
+# what makes a log reproducible.
+layer       = "core"
+
+category    = "tooling"
+
+tags        = ["sarif", "static-analysis", "diagnostics", "lint", "ci", "code-scanning", "serde-sarif", "sans-io"]
+repository  = "https://github.com/novolang/sarif-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The interchange format continuous integration reads, and the index that makes it one document"
+
+[dependencies]
+# NONE, AND THE THREE A READER MIGHT EXPECT ARE EACH DELIBERATE.
+#
+# The JSON value is the STANDARD LIBRARY's `JsonValueH`, not a
+# package's.  SARIF is a JSON format and the log has to reach whatever
+# the caller already writes JSON with; taking serde-nv or a codec here
+# would mean a consumer holding two JSON values and converting between
+# them to write one file.
+#
+# url-nv is not here.  An artifact location is a URI and this package
+# keeps it as the string the caller supplied, because SARIF's own rule
+# is that a URI is resolved against `originalUriBaseIds` at READ time
+# by whoever consumes the log — so a package that normalised one would
+# be answering a question it has no information for.  `sarifuri`'s three
+# checks say what is wrong with a URI without rewriting it.
+#
+# calendar-nv is not here either, and that is the `core` rule doing its
+# job: `invocation.startTimeUtc` is a timestamp, a `core` package has no
+# clock, and a package that formatted one would still have needed the
+# caller to supply the instant.  So the timestamps are strings the
+# caller writes, `sarifrun.timestamp_ok` checks them against SARIF's own
+# RFC 3339 profile, and a consumer that wants them typed parses them
+# with calendar-nv itself.

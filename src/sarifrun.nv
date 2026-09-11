@@ -1,0 +1,294 @@
+// sarifrun.nv — the log, the run, the tool, and the tables a ref points
+// into.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// WHAT THIS MODULE HOLDS is everything a tool writes ONCE per run: the
+// tool's own name and version, its rules, the files it looked at, the
+// command it was invoked with.  `sarifresult` holds what it writes once
+// per finding.  The split is along the line a reader cares about, and
+// it is also the line the format's own size argument runs along —
+// `sarifref`'s header is that argument.
+//
+// A LOG HOLDS SEVERAL RUNS, which is the shape the format has and the
+// shape a continuous-integration job needs: this repository's compiler
+// run, its formatter run and its dependency audit are one upload and
+// one comparison against one baseline.
+//
+// A RUN OWNS ITS TABLES, so a ref taken from one run means nothing in
+// another.  `sarifbuild.merge` re-interns rather than concatenating for
+// exactly that reason, and `artifact_of` answers `None` for the case
+// the type cannot rule out.
+
+use sarifref
+use sarifresult
+
+// A whole SARIF log: the version, the schema and the runs.
+pub struct SarifLog
+    version: Str
+    schema: Str
+    runs: [SarifRun]
+
+// One analysis: which tool, over which artifacts, under which rules,
+// producing which results.
+pub struct SarifRun
+    tool: SarifTool
+    // Every file any result in this run points at, each exactly once.
+    artifacts: [SarifArtifact]
+    // Every named place — a function, a type, a namespace — any result
+    // points at.  Separate from `artifacts` because a logical location
+    // is not a file: a finding in a generated method has one and has no
+    // source file at all.
+    logical_locations: [SarifLogicalLocation]
+    // The findings, in the order the tool produced them.
+    results: [sarifresult.SarifResult]
+    // What ran, when, and whether it succeeded.
+    invocations: [SarifInvocation]
+    // Where this run's relative URIs are relative TO.  The keys are
+    // names like `SRCROOT`; an artifact's `uri_base_id` names one.
+    uri_base_ids: [SarifUriBase]
+    // The run's own property bag.
+    properties: [sarifref.SarifProperty]
+
+// The tool that produced a run: one driver, and any extensions.
+pub struct SarifTool
+    driver: SarifDriver
+    // Plugins, rule packs, a linter inside a linter.  Each has rules of
+    // its own, and a result's rule index is relative to the component
+    // its ref names — which is why `SarifRuleRef` carries a component
+    // number and why `sarifbuild` refuses to intern a rule into an
+    // extension it was not given.
+    extensions: [SarifDriver]
+
+// One component of a tool: its name, its version, and its rules.
+pub struct SarifDriver
+    name: Str
+    // The version the tool reports of itself.  Empty when it does not.
+    version: Str
+    // A version a consumer may compare — SARIF's `semanticVersion`.
+    // Separate from `version` because a tool's own version string is
+    // frequently not a semantic version, and a consumer told to compare
+    // `1.2.3-nightly.4` with `1.2.3` would be wrong.
+    semantic_version: Str
+    // Where the tool's documentation lives.
+    information_uri: Str
+    // Every rule this component can report, each exactly once.
+    rules: [SarifRule]
+
+// One rule: what it checks, what it is called, and what it says.
+//
+// `id` is the stable identifier a result names and a person suppresses
+// by — `E2004`, `W1001`.  `name` is a readable identifier.  The
+// distinction matters because consumers group by `id` and display
+// `name`, and a tool that made them the same string has rules nobody
+// can rename.
+pub struct SarifRule
+    id: Str
+    name: Str
+    // One line, for a list.
+    short_description: Str
+    // A paragraph, for a panel.  Markdown is allowed by the format and
+    // is the caller's business; this package carries the string.
+    full_description: Str
+    // What a result of this rule carries when it does not say.
+    default_level: sarifref.SarifLevel
+    // Where the rule is documented.
+    help_uri: Str
+    // The rule's own property bag — where a tool puts its taxonomy
+    // links, its tags, and everything the format has no field for.
+    properties: [sarifref.SarifProperty]
+
+// One file a run has something to say about.
+pub struct SarifArtifact
+    // The URI as the caller supplied it.  NOT normalised: SARIF
+    // resolves a URI against the run's bases at READ time, so a package
+    // that rewrote one here would be answering a question it has no
+    // information for.
+    uri: Str
+    // Which `uri_base_ids` entry this URI is relative to, or empty for
+    // an absolute one.
+    uri_base_id: Str
+    // The media type, when the tool knows it.
+    mime_type: Str
+    // The file's length in bytes, or -1 when unknown.
+    length: Int
+    // What the artifact is FOR, in the format's own strings:
+    // `analysisTarget`, `attachment`, `deletedFile`, `tracedFile`.
+    roles: [Str]
+
+// A named place in a program, independent of any file.
+pub struct SarifLogicalLocation
+    // The short name: `parse`.
+    name: Str
+    // The full name: `novo_lib.parser.parse`.
+    fully_qualified_name: Str
+    // SARIF's own vocabulary: `function`, `member`, `module`,
+    // `namespace`, `type`, `parameter`, `variable`, `returnType`.
+    kind: Str
+    // The enclosing logical location's index, or -1 for a root.
+    parent_index: Int
+
+// What ran, and whether it worked.
+//
+// `successful` is not a formality.  A log whose invocation failed is a
+// log whose EMPTY result list means "the analysis did not run" rather
+// than "nothing was found", and a pipeline that treated the two the
+// same reports a clean build for a compiler that crashed.
+pub struct SarifInvocation
+    // The command as it was run, for a person reading the log.
+    command_line: Str
+    // The arguments, one per element, for a consumer that wants them
+    // apart.
+    arguments: [Str]
+    // Whether the tool completed.
+    successful: Bool
+    // Process exit code, or -1 when there was none.
+    exit_code: Int
+    // RFC 3339 in UTC, as the caller supplies them.  A `core` package
+    // has no clock; `timestamp_ok` is the check, and the caller is the
+    // party that knows what time it is.
+    start_time_utc: Str
+    end_time_utc: Str
+    // The directory the tool ran in, as a URI.
+    working_directory: Str
+
+// A named base for the relative URIs in a run.
+pub struct SarifUriBase
+    // The name an artifact's `uri_base_id` refers to: `SRCROOT`.
+    id: Str
+    // The absolute URI it stands for.
+    uri: Str
+    // A human sentence saying what this base is.
+    description: Str
+
+// ── Constants ────────────────────────────────────────────────────────
+
+// The SARIF version this package reads and writes.
+//
+// One version, stated as a function rather than left implicit: SARIF
+// 1.0 was a different schema with a different shape, and "a log that
+// says 2.1.0 and is read as one" is the whole contract here.
+//
+// ```novo
+// use sarifrun
+//
+// fn main() [io]
+//     println(sarifrun.sarif_version())
+// ```
+pub fn sarif_version() -> Str []
+    todo("sarif-nv.sarifrun.sarif_version")
+
+// The `$schema` URI a written log carries.
+//
+// Written by default, because code-scanning services and editor
+// extensions use it to decide whether a `.json` is a SARIF log at all —
+// a log without one is valid and is treated as an unknown file by the
+// tools that would have read it.
+pub fn schema_uri() -> Str []
+    todo("sarif-nv.sarifrun.schema_uri")
+
+// An empty log at this package's version, with no runs.
+pub fn empty_log() -> SarifLog []
+    todo("sarif-nv.sarifrun.empty_log")
+
+// ── Reading a run ────────────────────────────────────────────────────
+
+// The artifact a ref names, or `None` when the ref is not this run's.
+//
+// The `None` is for the one case the type cannot rule out: a ref taken
+// from one run and used against another.
+pub fn artifact_of(r: SarifRun, a: sarifref.SarifArtifactRef) -> ?SarifArtifact []
+    todo("sarif-nv.sarifrun.artifact_of")
+
+// The rule a ref names, or `None`.
+pub fn rule_of(r: SarifRun, rr: sarifref.SarifRuleRef) -> ?SarifRule []
+    todo("sarif-nv.sarifrun.rule_of")
+
+// The logical location a ref names, or `None`.
+pub fn logical_of(r: SarifRun, lr: sarifref.SarifLogicalRef) -> ?SarifLogicalLocation []
+    todo("sarif-nv.sarifrun.logical_of")
+
+// The URI of the artifact a ref names, or the empty string.
+//
+// NOT resolved against the URI bases — `resolve_uri` is that, and
+// keeping the two apart is what stops a caller from resolving twice.
+pub fn artifact_uri(r: SarifRun, a: sarifref.SarifArtifactRef) -> Str []
+    todo("sarif-nv.sarifrun.artifact_uri")
+
+// An artifact's URI resolved against the run's own bases.
+//
+// A URI with no base answers itself; one whose base the run does not
+// declare answers itself too, because inventing a base would produce a
+// path that does not exist rather than a problem a person can see.
+// `uri_base_missing` is how a caller asks first.
+pub fn resolve_uri(r: SarifRun, a: sarifref.SarifArtifactRef) -> Str []
+    todo("sarif-nv.sarifrun.resolve_uri")
+
+// Whether an artifact names a URI base the run does not declare.
+pub fn uri_base_missing(r: SarifRun, a: sarifref.SarifArtifactRef) -> Bool []
+    todo("sarif-nv.sarifrun.uri_base_missing")
+
+// The rule with an identifier, or `None`.
+//
+// By `id` rather than by index, for a consumer that has a rule name out
+// of a configuration file and wants the rule.
+pub fn rule_by_id(r: SarifRun, id: Str) -> ?SarifRule []
+    todo("sarif-nv.sarifrun.rule_by_id")
+
+// How many results a run holds.
+pub fn result_count(r: SarifRun) -> Int []
+    todo("sarif-nv.sarifrun.result_count")
+
+// How many results a run holds at each level, in the order none, note,
+// warning, error.
+//
+// The four numbers a pipeline's summary line prints and a gate compares
+// against a threshold, answered in one walk rather than four.
+// Suppressed results are NOT counted, because a summary that counted
+// them tells a team their suppressions did nothing.
+pub fn level_counts(r: SarifRun) -> [Int] []
+    todo("sarif-nv.sarifrun.level_counts")
+
+// Every result at or above a level, reported, of kind `fail`.
+//
+// What a gate acts on, in one call, so that two pipelines cannot
+// disagree about what "an error" means.
+pub fn failing(r: SarifRun, min: sarifref.SarifLevel) -> [sarifresult.SarifResult] []
+    todo("sarif-nv.sarifrun.failing")
+
+// Every result whose baseline state is `new`.
+//
+// The list a pipeline adopting this on a codebase that already has
+// findings fails on — the difference between a gate a team keeps and
+// one they turn off.
+pub fn new_results(r: SarifRun) -> [sarifresult.SarifResult] []
+    todo("sarif-nv.sarifrun.new_results")
+
+// Whether a timestamp is the RFC 3339 profile SARIF requires: UTC, a
+// `T` separator, a `Z` suffix, and at most three fractional digits.
+//
+// A check and not a parser.  This package has no clock and no date
+// type; what it can do is tell a caller that the string it is about to
+// write is one a consumer will refuse, which is the failure that
+// otherwise arrives as a rejected upload.
+//
+// ```novo
+// use sarifrun
+//
+// fn main() [io]
+//     println("${sarifrun.timestamp_ok("2026-09-11T12:00:00Z")}")
+// ```
+pub fn timestamp_ok(s: Str) -> Bool []
+    todo("sarif-nv.sarifrun.timestamp_ok")
+
+// Whether a run says an analysis finished and found nothing to report.
+//
+// Not the same question as "no results": a run whose invocation was
+// unsuccessful did not finish, and the two have to be told apart before
+// a gate calls a build clean.
+pub fn run_is_clean(r: SarifRun) -> Bool []
+    todo("sarif-nv.sarifrun.run_is_clean")
+
+// Whether every invocation of a run reported success.
+pub fn invocations_succeeded(r: SarifRun) -> Bool []
+    todo("sarif-nv.sarifrun.invocations_succeeded")

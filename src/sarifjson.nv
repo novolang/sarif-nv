@@ -1,0 +1,182 @@
+// sarifjson.nv — the log as JSON, both directions, and the checks that
+// belong beside them.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE JSON VALUE IS THE STANDARD LIBRARY's.  `write` answers a
+// `JsonValueH` and `read` takes one, so a caller serialises with
+// `json.stringify` or `json.pretty` and reaches whatever it already
+// writes JSON with.  Taking a package's JSON type here would have meant
+// a consumer holding two JSON values and converting between them to
+// write one file.
+//
+// `write_text` and `read_text` are the string shortcuts, and they are
+// two calls rather than a flag because the pretty form is what a person
+// diffs in a pull request and the compact form is what an upload
+// carries — and a tool usually knows which it is producing.
+//
+// WHAT A WRITER OMITS.  Every field with an absent value:  an empty
+// string, an empty list, an index of -1, a region with nothing set.
+// SARIF's own schema makes almost everything optional, so a writer that
+// emitted `"snippet": ""` for every result would produce a document
+// several times the size that means exactly the same thing.  The one
+// exception is `"version"` and `"$schema"`, which are always written.
+//
+// WHAT A READER REFUSES AND WHAT IT ONLY REPORTS is `sariferr`'s
+// header, and it is the interesting decision in this module: a
+// `ruleIndex` pointing outside the rule table is a REFUSAL, because
+// nothing can be done with it, while a `ruleId` disagreeing with the
+// rule at `ruleIndex` is a PROBLEM the log still parses with — the
+// tools that write SARIF break that rule constantly, and a reader that
+// refused could not be pointed at a real repository.
+
+use sarifrun
+use sariferr
+
+// How deep `read` will follow a document before refusing.
+//
+// A bound rather than a stack overflow, because a SARIF log arrives
+// from a build service and is therefore input from outside.  Code flows
+// nest and a hostile document can nest them as far as it likes.
+pub fn default_depth() -> Int []
+    todo("sarif-nv.sarifjson.default_depth")
+
+// A log as the standard library's JSON value.
+//
+// ```novo
+// use sarifjson
+// use sarifrun
+// use std.json
+//
+// fn main() [io]
+//     println(json.type_of(sarifjson.write(sarifrun.empty_log())))
+// ```
+pub fn write(log: sarifrun.SarifLog) -> JsonValueH []
+    todo("sarif-nv.sarifjson.write")
+
+// One run as a JSON value, for a caller assembling a log itself.
+pub fn write_run(r: sarifrun.SarifRun) -> JsonValueH []
+    todo("sarif-nv.sarifjson.write_run")
+
+// A log as compact JSON text.
+//
+// What an upload carries.
+pub fn write_text(log: sarifrun.SarifLog) -> Str []
+    todo("sarif-nv.sarifjson.write_text")
+
+// A log as indented JSON text.
+//
+// What a person diffs in a pull request, and the reason it is a second
+// call rather than a flag: a tool usually knows which of the two it is
+// producing, and a flag makes every call site say so again.
+pub fn write_pretty(log: sarifrun.SarifLog) -> Str []
+    todo("sarif-nv.sarifjson.write_pretty")
+
+// A log read out of a JSON value.
+//
+// Refuses a document whose shape or whose indices are wrong; see
+// `sariferr`.  Everything a schema validator would accept and a
+// consumer would misread is a `SarifProblem` from `problems` instead,
+// and this call does not run them — a reader that validated every log
+// it read would make the common path pay for the rare one.
+pub fn read(v: JsonValueH) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
+    todo("sarif-nv.sarifjson.read")
+
+// A log read out of a JSON value, following at most `max_depth` levels.
+pub fn read_with_depth(v: JsonValueH,
+                       max_depth: Int) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
+    todo("sarif-nv.sarifjson.read_with_depth")
+
+// A log read out of JSON text.
+//
+// `SarifNotJson` when the text is not JSON, which is a different
+// refusal from a document that parses and is not SARIF — a caller
+// showing a person what went wrong needs to know which.
+pub fn read_text(text: Str) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
+    todo("sarif-nv.sarifjson.read_text")
+
+// One run read out of a JSON value.
+pub fn read_run(v: JsonValueH) -> Result<sarifrun.SarifRun, sariferr.SarifError> []
+    todo("sarif-nv.sarifjson.read_run")
+
+// Write a log to a sink, and be charged exactly what the sink costs.
+//
+// THE ONE EFFECT-POLYMORPHIC SIGNATURE IN THIS PACKAGE.  `W: Write[e]`
+// binds the standard library's `Write` trait's effect parameter and the
+// clause is `[e]`, so the row means "whatever the impl behind `W`
+// supplies": a file charges the caller `[fs]`, a pipe `[io]`, an
+// in-memory buffer nothing — and this package has named no effect of
+// its own (SPEC § 5.6, `docs/publishing.md` § How a `core` package
+// takes a stream from its host).
+//
+// Worth having rather than `write_text` plus the caller's own write,
+// because a SARIF log of a large analysis is tens of megabytes and
+// building the whole string first is the allocation this avoids.
+pub fn write_to<W: Write[e]>(w: W, log: sarifrun.SarifLog) -> ?IoError [e]
+    todo("sarif-nv.sarifjson.write_to")
+
+// ── The checks ───────────────────────────────────────────────────────
+
+// Everything wrong with a log that parsed.
+//
+// The eight `SarifProblem` variants, over every run.  A tool runs this
+// over its own output in its test suite; a consumer runs it over a log
+// it was handed before trusting the numbers in it.
+//
+// Answers a list and not a `Result`, because a log with three problems
+// is a log with three problems and reporting the first hides the other
+// two — the same reason this project's schema and OpenAPI packages
+// answer every failure rather than the first.
+pub fn problems(log: sarifrun.SarifLog) -> [sariferr.SarifProblem] []
+    todo("sarif-nv.sarifjson.problems")
+
+// Everything wrong with one run.
+pub fn run_problems(r: sarifrun.SarifRun) -> [sariferr.SarifProblem] []
+    todo("sarif-nv.sarifjson.run_problems")
+
+// Everything wrong with one result of a run.
+//
+// The refs are checked against the run's own tables, which is what
+// catches a result built by hand with another run's refs in it.
+pub fn result_problems(r: sarifrun.SarifRun, index: Int) -> [sariferr.SarifProblem] []
+    todo("sarif-nv.sarifjson.result_problems")
+
+// The artifacts whose URIs are two spellings of one path.
+//
+// Reported and not merged: this package interns by BYTE equality
+// because deciding two paths are one means knowing what they are
+// relative to, and SARIF's answer to that is the URI bases a consumer
+// resolves.  A tool that fed `./src/a.nv` and `src/a.nv` gets told.
+pub fn duplicate_artifacts(r: sarifrun.SarifRun) -> [sariferr.SarifProblem] []
+    todo("sarif-nv.sarifjson.duplicate_artifacts")
+
+// Whether a log has any problem `sariferr.problem_is_serious` calls
+// serious.
+//
+// The one-line question a tool's own test suite asks about its output.
+pub fn is_sound(log: sarifrun.SarifLog) -> Bool []
+    todo("sarif-nv.sarifjson.is_sound")
+
+// A round trip: write a log and read it back.
+//
+// Published as a call because it is the assertion this package's
+// implementation will be held to, and because a consumer converting
+// between a log it built and a log it received wants exactly it.
+// The result is EQUAL to the input for every log this package builds,
+// and may lose members of a log read from elsewhere — see
+// `unknown_members`.
+pub fn round_trip(log: sarifrun.SarifLog) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
+    todo("sarif-nv.sarifjson.round_trip")
+
+// The JSON Pointers of members a read dropped because this package has
+// no field for them.
+//
+// SARIF 2.1.0 has objects this package does not declare — `graphs`,
+// `webRequest`, `webResponse`, `conversion`, `externalPropertyFiles`,
+// `taxonomies`, `addresses`, `translations`, `policies` — and a reader
+// that silently dropped them would make a round trip lossy with nothing
+// said.  This is what says so, against the value that was read.
+//
+// The README names every one of them and why.
+pub fn unknown_members(v: JsonValueH) -> [Str] []
+    todo("sarif-nv.sarifjson.unknown_members")

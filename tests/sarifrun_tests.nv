@@ -1,0 +1,221 @@
+// sarifrun_tests.nv — the questions a gate asks a run, and the one it
+// gets wrong.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: a run with no results and a
+// FAILED invocation is not clean. A pipeline that read an empty result
+// list as "nothing was found" reports a clean build for a compiler that
+// crashed, and `run_is_clean` is that distinction written once so two
+// pipelines cannot disagree about it.
+
+use std.test
+use std.list
+use std.json
+use sarifref
+use sarifresult
+use sarifrun
+use sarifbuild
+
+fn ran_ok() -> sarifrun.SarifInvocation
+    SarifInvocation { command_line: "novo build src/main.nv",
+                      arguments: ["build", "src/main.nv"],
+                      successful: true, exit_code: 0,
+                      start_time_utc: "2026-09-11T12:00:00Z",
+                      end_time_utc: "2026-09-11T12:00:04Z",
+                      working_directory: "file:///repo/" }
+
+fn crashed() -> sarifrun.SarifInvocation
+    SarifInvocation { command_line: "novo build src/main.nv",
+                      arguments: ["build", "src/main.nv"],
+                      successful: false, exit_code: 134,
+                      start_time_utc: "2026-09-11T12:00:00Z",
+                      end_time_utc: "2026-09-11T12:00:01Z",
+                      working_directory: "file:///repo/" }
+
+@test
+fn test_no_results_and_a_failed_run_are_not_the_same_answer() [io]
+    var ok = sarifbuild.builder("novo", "0.8.9")
+    ok = sarifbuild.invocation(ok, ran_ok())
+
+    var bad = sarifbuild.builder("novo", "0.8.9")
+    bad = sarifbuild.invocation(bad, crashed())
+
+    test.case("both runs have no results")
+    test.assert(sarifrun.result_count(sarifbuild.finish(ok)) == 0)
+    test.assert(sarifrun.result_count(sarifbuild.finish(bad)) == 0)
+
+    test.case("THE DISTINCTION: only one of them is clean")
+    test.assert(sarifrun.run_is_clean(sarifbuild.finish(ok)))
+    test.assert(not sarifrun.run_is_clean(sarifbuild.finish(bad)))
+
+    test.case("and the invocation is where the difference lives")
+    test.assert(sarifrun.invocations_succeeded(sarifbuild.finish(ok)))
+    test.assert(not sarifrun.invocations_succeeded(sarifbuild.finish(bad)))
+
+@test
+fn test_level_counts_are_four_numbers_in_one_walk() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.invocation(b, ran_ok())
+    b = sarifbuild.add_result(b, "E1", SarifLevelError, "a.nv",
+                              sarifresult.whole_artifact(), "e")
+    b = sarifbuild.add_result(b, "E1", SarifLevelError, "a.nv",
+                              sarifresult.whole_artifact(), "e")
+    b = sarifbuild.add_result(b, "W1", SarifLevelWarning, "a.nv",
+                              sarifresult.whole_artifact(), "w")
+    b = sarifbuild.add_result(b, "N1", SarifLevelNote, "a.nv",
+                              sarifresult.whole_artifact(), "n")
+    let r = sarifbuild.finish(b)
+
+    test.case("none, note, warning, error — in that order")
+    let counts = sarifrun.level_counts(r)
+    test.assert(list.len(counts) == 4)
+    test.assert(counts[1] == 1)
+    test.assert(counts[2] == 1)
+    test.assert(counts[3] == 2)
+
+    test.case("a run with findings is not clean")
+    test.assert(not sarifrun.run_is_clean(r))
+
+@test
+fn test_a_suppressed_result_is_not_counted_in_the_summary() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.invocation(b, ran_ok())
+    b = sarifbuild.add_result(b, "E1", SarifLevelError, "a.nv",
+                              sarifresult.whole_artifact(), "e")
+    b = sarifbuild.with_suppression(b, SarifSuppression {
+            kind: SarifSuppressionInSource, status: SarifSuppressionAccepted,
+            justification: "known", location: sarifresult.location(
+                sarifref.no_artifact(), sarifresult.whole_artifact()) })
+    let r = sarifbuild.finish(b)
+
+    test.case("the result is in the run")
+    test.assert(sarifrun.result_count(r) == 1)
+
+    test.case("and not in the numbers — counting it would tell a team their suppressions did nothing")
+    test.assert(sarifrun.level_counts(r)[3] == 0)
+
+    test.case("nor in what the gate acts on")
+    test.assert(list.len(sarifrun.failing(r, SarifLevelError)) == 0)
+
+@test
+fn test_the_gate_and_the_baseline_are_two_different_lists() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.invocation(b, ran_ok())
+    b = sarifbuild.add_result(b, "E1", SarifLevelError, "a.nv",
+                              sarifresult.whole_artifact(), "old")
+    b = sarifbuild.with_baseline(b, SarifBaselineUnchanged)
+    b = sarifbuild.add_result(b, "E2", SarifLevelError, "a.nv",
+                              sarifresult.whole_artifact(), "new")
+    b = sarifbuild.with_baseline(b, SarifBaselineNew)
+    let r = sarifbuild.finish(b)
+
+    test.case("two errors fail an error gate")
+    test.assert(list.len(sarifrun.failing(r, SarifLevelError)) == 2)
+
+    test.case("and one of them is new — which is the gate a team keeps")
+    test.assert(list.len(sarifrun.new_results(r)) == 1)
+
+    test.case("a warning gate catches at least as much as an error gate")
+    test.assert(list.len(sarifrun.failing(r, SarifLevelWarning)) >= 2)
+
+@test
+fn test_a_rule_can_be_found_by_its_identifier() [io]
+    var b = sarifbuild.builder_with("novo", "0.8.9", "0.8.9",
+                                    "https://novo-lang.org/")
+    let d = sarifbuild.set_rule(b, SarifRule {
+            id: "E2004", name: "unknown-field", short_description: "no such field",
+            full_description: "", default_level: SarifLevelError,
+            help_uri: "https://novo-lang.org/errors/E2004", properties: [] })
+    let r = sarifbuild.finish(d.0)
+
+    test.case("by identifier, for a consumer holding a name from a config file")
+    match sarifrun.rule_by_id(r, "E2004")
+        None    => test.assert(false)
+        Some(x) => test.assert(x.name == "unknown-field")
+
+    test.case("and an identifier the run does not declare answers None")
+    test.assert(sarifrun.rule_by_id(r, "E9999") == None)
+
+    test.case("the four facts a consumer shows about the tool are all set")
+    test.assert(r.tool.driver.information_uri == "https://novo-lang.org/")
+    test.assert(r.tool.driver.semantic_version == "0.8.9")
+
+@test
+fn test_a_ref_from_another_run_answers_none_rather_than_a_wrong_artifact() [io]
+    var a = sarifbuild.builder("novo", "0.8.9")
+    let pa = sarifbuild.artifact(a, "src/a.nv")
+    let pb = sarifbuild.artifact(pa.0, "src/b.nv")
+    let ra = sarifbuild.finish(pb.0)
+
+    let empty = sarifbuild.finish(sarifbuild.builder("novo", "0.8.9"))
+
+    test.case("the ref resolves in the run that minted it")
+    match sarifrun.artifact_of(ra, pb.1)
+        None    => test.assert(false)
+        Some(x) => test.assert(x.uri == "src/b.nv")
+
+    test.case("THE CASE THE TYPE CANNOT RULE OUT: not in another run")
+    test.assert(sarifrun.artifact_of(empty, pb.1) == None)
+
+    test.case("and the URI of an unresolvable ref is the empty string, not a panic")
+    test.assert(sarifrun.artifact_uri(empty, pb.1) == "")
+
+@test
+fn test_a_logical_location_is_not_a_file() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    let l = sarifbuild.logical(b, SarifLogicalLocation {
+            name: "parse", fully_qualified_name: "novo_lib.parser.parse",
+            kind: "function", parent_index: -1 })
+    let r = sarifbuild.finish(l.0)
+
+    test.case("it is in the run's own table")
+    match sarifrun.logical_of(r, l.1)
+        None    => test.assert(false)
+        Some(x) => test.assert(x.fully_qualified_name == "novo_lib.parser.parse")
+
+    test.case("and no artifact was interned for it")
+    test.assert(list.len(r.artifacts) == 0)
+
+@test
+fn test_the_timestamp_check_is_sarifs_profile_and_not_rfc_3339_at_large() [io]
+    test.case("UTC with a Z")
+    test.assert(sarifrun.timestamp_ok("2026-09-11T12:00:00Z"))
+
+    test.case("three fractional digits are the most the profile allows")
+    test.assert(sarifrun.timestamp_ok("2026-09-11T12:00:00.123Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00.1234Z"))
+
+    test.case("an offset that is not Z is RFC 3339 and not this profile")
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00+02:00"))
+
+    test.case("a space instead of the T is refused")
+    test.assert(not sarifrun.timestamp_ok("2026-09-11 12:00:00Z"))
+
+    test.case("and so is a date on its own")
+    test.assert(not sarifrun.timestamp_ok("2026-09-11"))
+
+@test
+fn test_the_log_carries_the_version_and_the_schema_this_package_writes() [io]
+    let e = sarifrun.empty_log()
+
+    test.case("an empty log is a log")
+    test.assert(list.len(e.runs) == 0)
+    test.assert(e.version == "2.1.0")
+    test.assert(sarifrun.sarif_version() == "2.1.0")
+
+    test.case("and the schema URI is there — a consumer decides by it whether a .json is SARIF")
+    test.assert(sarifrun.schema_uri() != "")
+    test.assert(e.schema == sarifrun.schema_uri())
+
+@test
+fn test_a_run_carries_its_own_property_bag() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.set_property(b, "novo/commit", json.string("d36ee36"))
+    let r = sarifbuild.finish(b)
+
+    test.case("the property reads back off the run")
+    match sarifref.property(r.properties, "novo/commit")
+        None    => test.assert(false)
+        Some(v) => test.assert(json.to_str(v) == Some("d36ee36"))

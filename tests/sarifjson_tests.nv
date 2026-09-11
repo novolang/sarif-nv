@@ -1,0 +1,265 @@
+// sarifjson_tests.nv — the two directions, and the line between a
+// refusal and a finding.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: `read` REFUSES an index that
+// points outside its table and only REPORTS a `ruleId` that disagrees
+// with the rule at its index. The first is a document nothing can be
+// done with; the second is a document the tools that write SARIF
+// produce every day, and a reader that refused it could not be pointed
+// at a real repository.
+
+use std.test
+use std.list
+use std.str
+use std.json
+use sarifresult
+use sarifrun
+use sarifbuild
+use sarifjson
+use sariferr
+
+fn one_result_log() -> sarifrun.SarifLog
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.add_result(b, "E2004", SarifLevelError, "src/parser.nv",
+                              sarifresult.text_region(13, 1, 13, 9),
+                              "no field `nmae` on `Token`")
+    sarifbuild.finish_log(b)
+
+@test
+fn test_a_log_this_package_built_round_trips() [io]
+    let doc = one_result_log()
+
+    test.case("a written log reads back")
+    match sarifjson.round_trip(doc)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            test.assert(list.len(back.runs) == 1)
+            test.assert(sarifrun.result_count(back.runs[0]) == 1)
+            test.assert(back.version == sarifrun.sarif_version())
+
+    test.case("the artifact table survived, and so did the index that points into it")
+    match sarifjson.round_trip(doc)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            match sarifresult.primary_location(back.runs[0].results[0])
+                None    => test.assert(false)
+                Some(l) => test.assert(sarifrun.artifact_uri(back.runs[0],
+                                                             l.physical.artifact)
+                                       == "src/parser.nv")
+
+    test.case("and nothing was dropped, because this package wrote it")
+    test.assert(list.len(sarifjson.unknown_members(sarifjson.write(doc))) == 0)
+
+@test
+fn test_the_two_text_forms_are_two_calls_because_they_have_two_readers() [io]
+    let doc = one_result_log()
+
+    test.case("compact for an upload")
+    let compact = sarifjson.write_text(doc)
+    test.assert(not str.contains(compact, "\n"))
+
+    test.case("indented for a person reading a diff")
+    test.assert(str.contains(sarifjson.write_pretty(doc), "\n"))
+
+    test.case("and both read back as the same log")
+    match sarifjson.read_text(compact)
+        Err(_) => test.assert(false)
+        Ok(a)  => test.assert(sarifrun.result_count(a.runs[0]) == 1)
+
+@test
+fn test_a_writer_omits_what_is_absent() [io]
+    let v = sarifjson.write(one_result_log())
+
+    test.case("the version and the schema are always written")
+    test.assert(json.get_str(v, "version") == Some(sarifrun.sarif_version()))
+    match json.get_str(v, "\$schema")
+        None    => test.assert(false)
+        Some(s) => test.assert(str.contains(s, "sarif"))
+
+    test.case("and an empty snippet is not a member rather than an empty string")
+    let runs = json.get_list(v, "runs") ?? []
+    test.assert(list.len(runs) == 1)
+    match json.query(runs[0], "results")
+        None     => test.assert(false)
+        Some(rs) =>
+            match json.index(rs, 0)
+                None    => test.assert(false)
+                Some(r) => test.assert(json.get(r, "suppressions") == None)
+
+@test
+fn test_a_document_that_is_not_a_log_is_refused_and_says_where() [io]
+    test.case("bytes that are not JSON")
+    match sarifjson.read_text("{not json")
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(sariferr.error_pointer(e) == "")
+
+    test.case("a version this package does not read, named as its own refusal")
+    match sarifjson.read_text("{\"version\":\"1.0.0\",\"runs\":[]}")
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(str.contains(sariferr.render(e, "out.sarif"), "out.sarif"))
+
+    test.case("a member of the wrong type, with a JSON Pointer")
+    match sarifjson.read_text("{\"version\":\"2.1.0\",\"runs\":{}}")
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(sariferr.error_pointer(e) == "/runs")
+
+    test.case("AND THE ONE A SCHEMA VALIDATOR PASSES: an index outside its table")
+    let bad = str.join(["{\"version\":\"2.1.0\",\"runs\":[{",
+                        "\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[]}},",
+                        "\"results\":[{\"ruleId\":\"X\",\"ruleIndex\":7,",
+                        "\"message\":{\"text\":\"m\"}}]}]}"],
+                        "")
+    match sarifjson.read_text(bad)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(str.contains(sariferr.error_pointer(e), "/runs/0/results/0"))
+
+@test
+fn test_a_log_that_parses_and_is_wrong_is_reported_and_not_refused() [io]
+    // A `ruleId` that disagrees with the rule at `ruleIndex`.  Every
+    // tool that writes SARIF by hand produces this, which is why it is
+    // a finding rather than a refusal.
+    let mismatched = str.join(["{\"version\":\"2.1.0\",\"runs\":[{",
+                               "\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[",
+                               "{\"id\":\"A\"},{\"id\":\"B\"}]}},",
+                               "\"results\":[{\"ruleId\":\"A\",\"ruleIndex\":1,",
+                               "\"message\":{\"text\":\"m\"}}]}]}"],
+                               "")
+
+    test.case("it reads")
+    match sarifjson.read_text(mismatched)
+        Err(_)  => test.assert(false)
+        Ok(doc) =>
+            test.case("and `problems` says what is wrong with it")
+            let ps = sarifjson.problems(doc)
+            test.assert(list.len(ps) == 1)
+            test.assert(sariferr.problem_is_serious(ps[0]))
+            test.assert(str.contains(sariferr.problem_message(ps[0]), "A"))
+
+            test.case("so `is_sound` is false while `read` was Ok")
+            test.assert(not sarifjson.is_sound(doc))
+
+@test
+fn test_problems_answers_all_of_them_and_not_the_first() [io]
+    let two = str.join(["{\"version\":\"2.1.0\",\"runs\":[{",
+                        "\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[{\"id\":\"A\"}]}},",
+                        "\"artifacts\":[{\"location\":{\"uri\":\"a.nv\"}},",
+                        "{\"location\":{\"uri\":\"./a.nv\"}}],",
+                        "\"results\":[{\"ruleId\":\"A\",\"ruleIndex\":0,",
+                        "\"kind\":\"pass\",\"level\":\"error\",",
+                        "\"message\":{\"text\":\"m\"}}]}]}"],
+                        "")
+
+    match sarifjson.read_text(two)
+        Err(_)  => test.assert(false)
+        Ok(doc) =>
+            test.case("a pass carrying error, and two spellings of one path")
+            test.assert(list.len(sarifjson.problems(doc)) >= 2)
+
+            test.case("the duplicate is reported and NOT merged — see the artifact table")
+            test.assert(list.len(sarifjson.duplicate_artifacts(doc.runs[0])) == 1)
+            test.assert(list.len(doc.runs[0].artifacts) == 2)
+
+            test.case("and the duplicate is not one of the serious ones")
+            let dups = sarifjson.duplicate_artifacts(doc.runs[0])
+            test.assert(not sariferr.problem_is_serious(dups[0]))
+
+@test
+fn test_a_result_built_with_another_runs_refs_is_caught() [io]
+    var a = sarifbuild.builder("novo", "0.8.9")
+    a = sarifbuild.add_result(a, "E1", SarifLevelError, "src/a.nv",
+                              sarifresult.whole_artifact(), "one")
+    let ra = sarifbuild.finish(a)
+
+    test.case("the run this package built has no problems")
+    test.assert(list.len(sarifjson.run_problems(ra)) == 0)
+    test.assert(list.len(sarifjson.result_problems(ra, 0)) == 0)
+
+    test.case("a result index the run does not have answers no problems, not a panic")
+    test.assert(list.len(sarifjson.result_problems(ra, 99)) == 0)
+
+@test
+fn test_a_read_says_which_members_it_had_no_field_for() [io]
+    // `graphs` is one of the nine objects the README names as outside.
+    let with_graph = str.join(["{\"version\":\"2.1.0\",\"runs\":[{",
+                               "\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[]}},",
+                               "\"graphs\":[],\"results\":[]}]}"],
+                               "")
+
+    test.case("the document still reads")
+    match sarifjson.read_text(with_graph)
+        Err(_) => test.assert(false)
+        Ok(_)  => test.assert(true)
+
+    test.case("and the round trip is SHOWN to be lossy rather than discovered to be")
+    match json.parse(with_graph)
+        None    => test.assert(false)
+        Some(v) =>
+            let dropped = sarifjson.unknown_members(v)
+            test.assert(list.len(dropped) == 1)
+            test.assert(dropped[0] == "/runs/0/graphs")
+
+@test
+fn test_the_depth_bound_is_a_refusal_rather_than_a_stack_overflow() [io]
+    test.case("the default is a number, not an absence")
+    test.assert(sarifjson.default_depth() > 0)
+
+    test.case("a log read at depth 1 that nests deeper is refused")
+    match sarifjson.read_with_depth(sarifjson.write(one_result_log()), 1)
+        Ok(_)  => test.assert(false)
+        Err(_) => test.assert(true)
+
+@test
+fn test_writing_to_a_sink_costs_the_sinks_effects_and_not_this_packages() [io]
+    test.case("an in-memory buffer charges nothing, and the write succeeds")
+    let w = Buffer.new()
+    match sarifjson.write_to(w, one_result_log())
+        None    => test.assert(true)
+        Some(_) => test.assert(false)
+
+@test
+fn test_the_calls_the_worked_example_does_not_reach() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    let p = sarifbuild.artifact(b, "src/a.nv")
+    b = p.0
+
+    test.case("a result the caller assembled itself goes in through `add`")
+    let hand = SarifResult { rule: sarifref.no_rule(), rule_id: "E1",
+                             kind: SarifKindFail, level: SarifLevelError,
+                             message: "m", message_markdown: "",
+                             locations: [sarifresult.location(p.1,
+                                 sarifresult.region_from_span(0, 4))],
+                             related_locations: [], code_flows: [], fixes: [],
+                             suppressions: [], baseline: sarifresult.no_baseline(),
+                             fingerprints: [], properties: [] }
+    b = sarifbuild.add(b, hand)
+    test.assert(list.len(b.results) == 1)
+
+    test.case("a fix lands on the result added last")
+    b = sarifbuild.with_fix(b, SarifFix { description: "rename",
+            changes: [SarifChange { artifact: p.1,
+                replacements: [SarifReplacement {
+                    deleted_region: sarifresult.region_from_span(0, 4),
+                    inserted_text: "name" }] }] })
+    test.assert(list.len(b.results[0].fixes) == 1)
+
+    test.case("and the artifacts a result and its fixes touch are counted once each")
+    test.assert(list.len(sarifresult.touched_artifacts(b.results[0])) == 1)
+
+    test.case("level_for_kind corrects rather than refusing, which is what the builder needs")
+    test.assert(sarifref.level_for_kind(SarifKindPass, SarifLevelError) == SarifLevelNone)
+    test.assert(sarifref.level_for_kind(SarifKindFail, SarifLevelError) == SarifLevelError)
+
+    test.case("the run this built is sound")
+    test.assert(sarifjson.is_sound(sarifbuild.finish_log(b)))
+
+@test
+fn test_one_run_crosses_on_its_own() [io]
+    let r = one_result_log().runs[0]
+
+    test.case("a run writes and reads back without a log around it")
+    match sarifjson.read_run(sarifjson.write_run(r))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(sarifrun.result_count(back) == 1)

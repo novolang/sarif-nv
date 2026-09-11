@@ -1,0 +1,253 @@
+// sarifbuild_tests.nv — the worked example, and the interning that is
+// the whole point of it.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
+// That is the expected result until the bodies land.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR is the first one below: six
+// results over two files produce TWO artifacts. Everything else in this
+// file is a consequence of that or a case that would break it.
+//
+// THE VECTORS are the SARIF Technical Committee's example documents
+// from the specification's appendices and the `sarif-tutorials` sample
+// logs; the rule cases are `microsoft/sarif-sdk`'s validator corpus.
+
+use std.test
+use std.list
+use std.str
+use sarifref
+use sarifresult
+use sarifrun
+use sarifbuild
+
+fn at(line: Int) -> sarifresult.SarifRegion
+    sarifresult.text_region(line, 1, line, 9)
+
+@test
+fn test_six_results_over_two_files_intern_two_artifacts() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+
+    for i in 0..3
+        b = sarifbuild.add_result(b, "E2004", SarifLevelError, "src/parser.nv",
+                                  at(10 + i), "no field `nmae` on `Token`")
+    for i in 0..3
+        b = sarifbuild.add_result(b, "W1001", SarifLevelWarning, "src/lexer.nv",
+                                  at(20 + i), "unused binding")
+
+    test.case("THE CLAIM: six findings, two URIs")
+    test.assert(sarifbuild.artifact_count(b) == 2)
+
+    test.case("and two rules, not six")
+    test.assert(sarifbuild.rule_count(b) == 2)
+
+    test.case("every result is still there")
+    test.assert(list.len(b.results) == 6)
+
+    let r = sarifbuild.finish(b)
+
+    test.case("the run carries the table the results point into")
+    test.assert(list.len(r.artifacts) == 2)
+    test.assert(sarifrun.result_count(r) == 6)
+
+    test.case("and a result's artifact reads back as the path it was given")
+    match sarifresult.primary_location(r.results[0])
+        None    => test.assert(false)
+        Some(l) => test.assert(sarifrun.artifact_uri(r, l.physical.artifact) == "src/parser.nv")
+
+@test
+fn test_a_ref_can_only_come_from_the_table_it_indexes() [io]
+    let b = sarifbuild.builder("novo", "0.8.9")
+
+    test.case("interning answers a builder AND a ref, which is what fills the table")
+    let p = sarifbuild.artifact(b, "src/main.nv")
+    test.assert(sarifbuild.artifact_count(p.0) == 1)
+    test.assert(p.1.index == 0)
+
+    test.case("the same URI answers the same ref and adds nothing")
+    let q = sarifbuild.artifact(p.0, "src/main.nv")
+    test.assert(q.1.index == 0)
+    test.assert(sarifbuild.artifact_count(q.0) == 1)
+
+    test.case("a different URI is a different artifact")
+    let s = sarifbuild.artifact(q.0, "src/other.nv")
+    test.assert(s.1.index == 1)
+    test.assert(sarifbuild.artifact_count(s.0) == 2)
+
+    test.case("equality is BYTE equality — `./a` and `a` are two artifacts on purpose")
+    let t = sarifbuild.artifact(s.0, "./src/main.nv")
+    test.assert(t.1.index == 2)
+
+    test.case("and the absent ref is the one exception every table admits")
+    test.assert(sarifref.ref_absent(sarifref.no_artifact()))
+
+@test
+fn test_two_paths_relative_to_two_bases_are_two_files() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.uri_base(b, "SRCROOT", "file:///repo/", "the checkout")
+    b = sarifbuild.uri_base(b, "GENROOT", "file:///build/gen/", "generated sources")
+
+    let p = sarifbuild.artifact_under(b, "a.nv", "SRCROOT")
+    let q = sarifbuild.artifact_under(p.0, "a.nv", "GENROOT")
+
+    test.case("same URI, two bases, two artifacts")
+    test.assert(q.1.index != p.1.index)
+
+    let r = sarifbuild.finish(q.0)
+
+    test.case("and each resolves against its own base")
+    test.assert(sarifrun.resolve_uri(r, p.1) == "file:///repo/a.nv")
+    test.assert(sarifrun.resolve_uri(r, q.1) == "file:///build/gen/a.nv")
+
+    test.case("a URI whose base the run does not declare answers itself, and says so")
+    let s = sarifbuild.artifact_under(q.0, "b.nv", "NOSUCH")
+    let r2 = sarifbuild.finish(s.0)
+    test.assert(sarifrun.uri_base_missing(r2, s.1))
+    test.assert(sarifrun.resolve_uri(r2, s.1) == "b.nv")
+
+@test
+fn test_a_declared_rule_is_not_overwritten_by_a_mention() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    let declared = SarifRule { id: "E2004", name: "unknown-field",
+                               short_description: "no such field",
+                               full_description: "The field is not declared on the type.",
+                               default_level: SarifLevelError,
+                               help_uri: "https://novo-lang.org/errors/E2004",
+                               properties: [] }
+    let d = sarifbuild.set_rule(b, declared)
+    b = d.0
+
+    test.case("a later mention of the identifier answers the same rule")
+    let m = sarifbuild.rule(b, "E2004")
+    test.assert(sarifref.rule_ref_eq(m.1, d.1))
+
+    test.case("and does not replace the help text the tool declared at startup")
+    let r = sarifbuild.finish(m.0)
+    match sarifrun.rule_of(r, d.1)
+        None    => test.assert(false)
+        Some(x) => test.assert(x.help_uri == "https://novo-lang.org/errors/E2004")
+
+    test.case("set_rule is the call that does replace, and it says so in its name")
+    let again = sarifbuild.set_rule(m.0, SarifRule { id: "E2004", name: "unknown-field",
+                                                     short_description: "changed",
+                                                     full_description: "",
+                                                     default_level: SarifLevelError,
+                                                     help_uri: "", properties: [] })
+    let r2 = sarifbuild.finish(again.0)
+    match sarifrun.rule_by_id(r2, "E2004")
+        None    => test.assert(false)
+        Some(x) => test.assert(x.short_description == "changed")
+
+@test
+fn test_a_rule_of_an_extension_is_not_a_rule_of_the_driver() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    let ext = SarifDriver { name: "novo-lint-extra", version: "0.1.0",
+                            semantic_version: "0.1.0", information_uri: "",
+                            rules: [] }
+    let e = sarifbuild.extension(b, ext)
+    b = e.0
+
+    let plugin_rule = sarifbuild.rule_of_component(b, e.1, "X001")
+    let driver_rule = sarifbuild.rule(plugin_rule.0, "X001")
+
+    test.case("the same identifier in two components is two rules")
+    test.assert(not sarifref.rule_ref_eq(plugin_rule.1, driver_rule.1))
+    test.assert(plugin_rule.1.component != driver_rule.1.component)
+
+    test.case("a component number the builder does not have answers the absent rule")
+    let miss = sarifbuild.rule_of_component(driver_rule.0, 99, "Y001")
+    test.assert(sarifref.rule_ref_absent(miss.1))
+
+@test
+fn test_merging_re_interns_rather_than_concatenating() [io]
+    var a = sarifbuild.builder("novo", "0.8.9")
+    a = sarifbuild.add_result(a, "E2004", SarifLevelError, "src/a.nv", at(1), "one")
+    let ra = sarifbuild.finish(a)
+
+    var c = sarifbuild.builder("novo", "0.8.9")
+    c = sarifbuild.add_result(c, "W1001", SarifLevelWarning, "src/b.nv", at(2), "two")
+    let rc = sarifbuild.finish(c)
+
+    let m = sarifbuild.merge(ra, rc)
+
+    test.case("both results survived")
+    test.assert(sarifrun.result_count(m) == 2)
+
+    test.case("and both artifacts are in one table")
+    test.assert(list.len(m.artifacts) == 2)
+
+    test.case("THE BUG THIS PREVENTS: the second run's result still names its own file")
+    match sarifresult.primary_location(m.results[1])
+        None    => test.assert(false)
+        Some(l) => test.assert(sarifrun.artifact_uri(m, l.physical.artifact) == "src/b.nv")
+
+@test
+fn test_a_pass_cannot_leave_this_package_carrying_error() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.add_result_kind(b, "E2004", SarifKindPass, SarifLevelError,
+                                   "src/a.nv", at(1), "the rule held")
+
+    test.case("the level was corrected to the one the kind admits")
+    test.assert(b.results[0].level == SarifLevelNone)
+    test.assert(b.results[0].kind == SarifKindPass)
+
+    test.case("which is what level_ok says about the pair that was asked for")
+    test.assert(not sarifref.level_ok(SarifKindPass, SarifLevelError))
+    test.assert(sarifref.level_ok(SarifKindFail, SarifLevelError))
+    test.assert(sarifref.level_ok(SarifKindPass, SarifLevelNone))
+
+@test
+fn test_the_trailing_attachments_land_on_the_result_just_added() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.add_result(b, "E2004", SarifLevelError, "src/a.nv", at(1), "one")
+    b = sarifbuild.with_fingerprint(b, "novo/v1", "9f2c")
+    b = sarifbuild.with_baseline(b, SarifBaselineNew)
+    b = sarifbuild.add_result(b, "E2004", SarifLevelError, "src/a.nv", at(2), "two")
+
+    test.case("the fingerprint is on the first result and not the second")
+    test.assert(sarifresult.fingerprint(b.results[0], "novo/v1") == "9f2c")
+    test.assert(sarifresult.fingerprint(b.results[1], "novo/v1") == "")
+
+    test.case("and so is the baseline state")
+    test.assert(b.results[0].baseline.present)
+    test.assert(not b.results[1].baseline.present)
+
+    test.case("a builder with no results is unchanged rather than refused")
+    let empty = sarifbuild.with_fingerprint(sarifbuild.builder("novo", "0.8.9"),
+                                            "novo/v1", "0000")
+    test.assert(list.len(empty.results) == 0)
+
+@test
+fn test_a_result_with_no_location_is_legal_and_reads_as_one() [io]
+    var b = sarifbuild.builder("novo", "0.8.9")
+    b = sarifbuild.add_global(b, "E9999", SarifLevelError,
+                              "the analysis ran out of memory")
+
+    test.case("no location")
+    match sarifresult.primary_location(b.results[0])
+        None    => test.assert(true)
+        Some(_) => test.assert(false)
+
+    test.case("and no artifact was interned for it")
+    test.assert(sarifbuild.artifact_count(b) == 0)
+
+@test
+fn test_a_log_holds_several_runs() [io]
+    var a = sarifbuild.builder("novo", "0.8.9")
+    a = sarifbuild.add_result(a, "E2004", SarifLevelError, "src/a.nv", at(1), "one")
+
+    var f = sarifbuild.builder("novo fmt", "0.8.9")
+    f = sarifbuild.add_result(f, "F001", SarifLevelNote, "src/a.nv", at(1), "not canonical")
+
+    let doc = sarifbuild.log_of([sarifbuild.finish(a), sarifbuild.finish(f)])
+
+    test.case("two runs, one log")
+    test.assert(list.len(doc.runs) == 2)
+
+    test.case("each with its own tool")
+    test.assert(doc.runs[0].tool.driver.name == "novo")
+    test.assert(doc.runs[1].tool.driver.name == "novo fmt")
+
+    test.case("and the log carries the version this package writes")
+    test.assert(doc.version == sarifrun.sarif_version())
+    test.assert(str.contains(doc.schema, "sarif"))

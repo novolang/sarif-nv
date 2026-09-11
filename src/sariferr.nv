@@ -1,0 +1,131 @@
+// sariferr.nv — what reading a log refuses, and the checks a written
+// one should pass first.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// TWO DIFFERENT THINGS LIVE HERE AND THE DIFFERENCE IS THE POINT.
+//
+// `SarifError` is a REFUSAL: the bytes handed to `sarifjson.read` are
+// not a SARIF 2.1.0 log, and there is nothing to hand back.  It carries
+// a JSON Pointer, because a reader staring at a 40 MB log needs to be
+// told `/runs/0/results/318/locations/0` rather than "invalid
+// document".
+//
+// `SarifProblem` is a FINDING ABOUT A LOG that parsed: a result whose
+// `ruleId` and `ruleIndex` disagree, a fix whose replacement would
+// delete a file, a `pass` carrying `level: "error"`, two artifacts that
+// are two spellings of one path.  None of those stop a document being
+// read and every one of them is a bug in whatever wrote it.
+//
+// The two are separate types because a validator that raised on the
+// second class would be unusable against real logs — the tools that
+// produce them break these rules constantly — and a reader that ignored
+// the second class would silently pass their damage on.  `problems` is
+// a list, always, and the caller decides.
+
+// Why a document could not be read as a SARIF 2.1.0 log.
+pub enum SarifError
+    // The bytes are not JSON at all.
+    SarifNotJson(why: Str)
+    // Valid JSON, wrong shape: a member the format requires is missing
+    // or is of another type.  `pointer` is the RFC 6901 JSON Pointer of
+    // the place, and `want` says what was expected there.
+    SarifBadShape(pointer: Str, want: Str, got: Str)
+    // A `version` this package does not read.  Named separately from a
+    // shape fault because it is the one refusal a caller can act on —
+    // by finding a converter — and because reading a 1.0 log as a 2.1.0
+    // one gives wrong answers rather than no answers.
+    SarifWrongVersion(found: Str)
+    // An index that points outside its table.  The one class of fault
+    // that a schema validator passes and a reader cannot: `ruleIndex:
+    // 7` in a run with three rules is well-formed JSON matching the
+    // schema, and means nothing.
+    SarifIndexOutOfRange(pointer: Str, index: Int, size: Int)
+    // A string where the format admits a fixed set and this is not one
+    // of them — `level: "fatal"`, `kind: "broken"`.
+    SarifUnknownEnum(pointer: Str, field: Str, value: Str)
+    // The document nests deeper than the reader will follow.  A bound
+    // rather than a stack overflow: a SARIF log arrives from a build
+    // service and is therefore input from outside.
+    SarifTooDeep(pointer: Str, limit: Int)
+
+// `SarifError` is an `Error`, which is what lets
+// `Result<SarifLog, SarifError>` exist at all (SPEC § 3.4).
+impl Error for SarifError
+    // The one-line message, naming the rule rather than the reader's
+    // state.  The pointer is in the value and not in the sentence, so a
+    // caller renders it in its own diagnostic shape.
+    fn message(self) -> Str
+        todo("sarif-nv.SarifError.message")
+
+// Something wrong with a log that parsed.
+//
+// Every variant is a document a schema validator accepts and a consumer
+// misreads.
+pub enum SarifProblem
+    // A result's `ruleId` names one rule and its `ruleIndex` another.
+    // A consumer that reads the string and a consumer that reads the
+    // index then report two different rules for one finding.
+    SarifRuleIdMismatch(result_index: Int, id: Str, indexed_id: Str)
+    // A result whose kind is not `fail` carries a level that is not
+    // `none` — § 3.27.10.  A consumer that reads level without reading
+    // kind reports a passing check as a failure.
+    SarifLevelForKind(result_index: Int, kind: Str, level: Str)
+    // A fix whose replacement names no region, and therefore replaces
+    // the whole artifact.  Applying it deletes the file, which is a
+    // thing tools have shipped.
+    SarifUnboundedFix(result_index: Int, fix_index: Int)
+    // Two artifacts whose URIs differ only by a path spelling: `./a`
+    // and `a`, `a/../b` and `b`.  This package interns by BYTE
+    // equality on purpose — deciding two paths are one means knowing
+    // what they are relative to — so the duplicate is reported rather
+    // than merged.
+    SarifDuplicateArtifact(first: Int, second: Int, uri: Str)
+    // A rule declared twice with different descriptions.
+    SarifDuplicateRule(first: Int, second: Int, id: Str)
+    // A result whose region carries a character offset and a text
+    // position that cannot both be right about the same range — one
+    // says line 1 and the other says offset 4000.  Not always
+    // detectable and detected where it is, because an emitter that
+    // wrote a byte offset into `charOffset` produces a document that
+    // highlights the wrong text in every viewer.
+    SarifRegionDisagrees(result_index: Int, location_index: Int)
+    // A timestamp that is not SARIF's RFC 3339 profile.
+    SarifBadTimestamp(pointer: Str, value: Str)
+    // An artifact nothing points at.  Not an error — a tool may list
+    // what it scanned — but worth saying, because it is also what a
+    // merge that concatenated instead of re-interning leaves behind.
+    SarifOrphanArtifact(index: Int, uri: Str)
+
+// A one-line message for a problem.
+pub fn problem_message(p: SarifProblem) -> Str []
+    todo("sarif-nv.sariferr.problem_message")
+
+// Whether a problem would make a consumer report the wrong thing, as
+// opposed to merely being untidy.
+//
+// True for the rule-identifier mismatch, the level-for-kind fault, the
+// unbounded fix and the disagreeing region; false for the duplicates
+// and the orphan.  The split a caller uses to decide whether to refuse
+// a log or to log a warning about it.
+pub fn problem_is_serious(p: SarifProblem) -> Bool []
+    todo("sarif-nv.sariferr.problem_is_serious")
+
+// The JSON Pointer of the place an error refers to, or the empty
+// string.
+pub fn error_pointer(e: SarifError) -> Str []
+    todo("sarif-nv.sariferr.error_pointer")
+
+// `<file>: <message>`, or `<file>#<pointer>: <message>` when there is a
+// pointer.
+//
+// `file` is the caller's — this package never opened anything.
+//
+// ```novo
+// use sariferr
+//
+// fn main() [io]
+//     println(sariferr.render(SarifWrongVersion("1.0.0"), "out.sarif"))
+// ```
+pub fn render(e: SarifError, file: Str) -> Str []
+    todo("sarif-nv.sariferr.render")

@@ -1,0 +1,264 @@
+// sarifresult_tests.nv — three coordinate systems that are not
+// interchangeable, and the gate's own question.
+//
+// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
+// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
+//
+// THE ASSERTION THIS SUITE EXISTS FOR: a region built from a byte span
+// does NOT answer true to `region_has_chars`. An emitter that wrote a
+// byte offset into `charOffset` produces a document that validates and
+// highlights the wrong text in every viewer that prefers character
+// regions, and the only defence is that the two never silently become
+// each other.
+
+use std.test
+use std.list
+use std.json
+use sarifref
+use sarifresult
+
+@test
+fn test_the_three_coordinate_systems_stay_apart() [io]
+    test.case("a text region carries lines and columns and nothing else")
+    let t = sarifresult.text_region(13, 1, 13, 9)
+    test.assert(sarifresult.region_has_text(t))
+    test.assert(not sarifresult.region_has_chars(t))
+    test.assert(not sarifresult.region_has_bytes(t))
+
+    test.case("a character region carries an offset and not a line")
+    let c = sarifresult.char_region(4000, 12)
+    test.assert(sarifresult.region_has_chars(c))
+    test.assert(not sarifresult.region_has_text(c))
+    test.assert(not sarifresult.region_has_bytes(c))
+
+    test.case("THE ONE THAT MATTERS: a byte region is not a character region")
+    let b = sarifresult.byte_region(4000, 12)
+    test.assert(sarifresult.region_has_bytes(b))
+    test.assert(not sarifresult.region_has_chars(b))
+
+    test.case("and the two are not equal, because this package has not seen the file")
+    test.assert(not sarifresult.region_eq(b, c))
+
+@test
+fn test_columns_are_one_based_and_offsets_are_zero_based() [io]
+    test.case("the specification's own asymmetry, carried rather than smoothed over")
+    let t = sarifresult.text_region(1, 1, 1, 5)
+    test.assert(t.start_line == 1)
+    test.assert(t.start_column == 1)
+
+    test.case("a half-open byte span becomes offset and LENGTH")
+    let s = sarifresult.region_from_span(10, 22)
+    test.assert(s.byte_offset == 10)
+    test.assert(s.byte_length == 12)
+
+    test.case("an empty span is a zero-length region at a position, not an absent one")
+    let e = sarifresult.region_from_span(10, 10)
+    test.assert(sarifresult.region_has_bytes(e))
+    test.assert(e.byte_length == 0)
+
+@test
+fn test_a_region_that_says_nothing_means_the_whole_artifact() [io]
+    let w = sarifresult.whole_artifact()
+
+    test.case("no coordinate system is set")
+    test.assert(not sarifresult.region_has_text(w))
+    test.assert(not sarifresult.region_has_chars(w))
+    test.assert(not sarifresult.region_has_bytes(w))
+
+    test.case("and that is a legal region with a meaning of its own")
+    test.assert(sarifresult.region_is_whole(w))
+
+    test.case("a region with any coordinate is not the whole artifact")
+    test.assert(not sarifresult.region_is_whole(sarifresult.text_region(1, 1, 1, 2)))
+
+@test
+fn test_a_snippet_rides_with_the_region_and_changes_nothing_else() [io]
+    let t = sarifresult.text_region(13, 1, 13, 9)
+    let s = sarifresult.with_snippet(t, "let x = nmae")
+
+    test.case("the snippet is there")
+    test.assert(s.snippet == "let x = nmae")
+
+    test.case("and the coordinates did not move")
+    test.assert(s.start_line == t.start_line)
+    test.assert(s.end_column == t.end_column)
+
+@test
+fn test_a_suppression_nobody_approved_leaves_the_finding_in_force() [io]
+    let where_at = sarifresult.location(sarifref.no_artifact(),
+                                        sarifresult.whole_artifact())
+    let accepted = SarifSuppression { kind: SarifSuppressionInSource,
+                                      status: SarifSuppressionAccepted,
+                                      justification: "false positive",
+                                      location: where_at }
+    let pending = SarifSuppression { kind: SarifSuppressionExternal,
+                                     status: SarifSuppressionUnderReview,
+                                     justification: "asked the author",
+                                     location: where_at }
+
+    let base = SarifResult { rule: sarifref.no_rule(), rule_id: "E2004",
+                             kind: SarifKindFail, level: SarifLevelError,
+                             message: "m", message_markdown: "",
+                             locations: [], related_locations: [],
+                             code_flows: [], fixes: [], suppressions: [],
+                             baseline: sarifresult.no_baseline(),
+                             fingerprints: [], properties: [] }
+
+    test.case("no suppression at all: reported")
+    test.assert(sarifresult.is_reported(base))
+
+    test.case("an ACCEPTED suppression: not reported")
+    test.assert(not sarifresult.is_reported(SarifResult { rule: base.rule,
+        rule_id: base.rule_id, kind: base.kind, level: base.level,
+        message: base.message, message_markdown: "", locations: [],
+        related_locations: [], code_flows: [], fixes: [],
+        suppressions: [accepted], baseline: base.baseline,
+        fingerprints: [], properties: [] }))
+
+    test.case("THE CASE `suppressions == []` GETS WRONG: under review, still reported")
+    test.assert(sarifresult.is_reported(SarifResult { rule: base.rule,
+        rule_id: base.rule_id, kind: base.kind, level: base.level,
+        message: base.message, message_markdown: "", locations: [],
+        related_locations: [], code_flows: [], fixes: [],
+        suppressions: [pending], baseline: base.baseline,
+        fingerprints: [], properties: [] }))
+
+@test
+fn test_fails_at_is_the_three_part_condition_written_once() [io]
+    let warn = SarifResult { rule: sarifref.no_rule(), rule_id: "W1001",
+                             kind: SarifKindFail, level: SarifLevelWarning,
+                             message: "m", message_markdown: "",
+                             locations: [], related_locations: [],
+                             code_flows: [], fixes: [], suppressions: [],
+                             baseline: sarifresult.no_baseline(),
+                             fingerprints: [], properties: [] }
+
+    test.case("a warning fails a warning gate")
+    test.assert(sarifresult.fails_at(warn, SarifLevelWarning))
+
+    test.case("and does not fail an error gate")
+    test.assert(not sarifresult.fails_at(warn, SarifLevelError))
+
+    test.case("a result of a non-failing kind never fails a gate")
+    let passed = SarifResult { rule: warn.rule, rule_id: warn.rule_id,
+                               kind: SarifKindPass, level: SarifLevelNone,
+                               message: "m", message_markdown: "",
+                               locations: [], related_locations: [],
+                               code_flows: [], fixes: [], suppressions: [],
+                               baseline: sarifresult.no_baseline(),
+                               fingerprints: [], properties: [] }
+    test.assert(not sarifresult.fails_at(passed, SarifLevelNone))
+
+@test
+fn test_a_fix_that_names_no_region_would_delete_the_file() [io]
+    let deleting = SarifReplacement { deleted_region: sarifresult.whole_artifact(),
+                                      inserted_text: "" }
+    let bounded = SarifReplacement { deleted_region: sarifresult.region_from_span(4, 8),
+                                     inserted_text: "name" }
+
+    let with_bad = SarifResult { rule: sarifref.no_rule(), rule_id: "E2004",
+                                 kind: SarifKindFail, level: SarifLevelError,
+                                 message: "m", message_markdown: "",
+                                 locations: [], related_locations: [], code_flows: [],
+                                 fixes: [SarifFix { description: "rename",
+                                                    changes: [SarifChange {
+                                                        artifact: sarifref.no_artifact(),
+                                                        replacements: [deleting] }] }],
+                                 suppressions: [], baseline: sarifresult.no_baseline(),
+                                 fingerprints: [], properties: [] }
+
+    test.case("a replacement over the whole artifact is not bounded")
+    test.assert(not sarifresult.fixes_are_bounded(with_bad))
+
+    let with_good = SarifResult { rule: with_bad.rule, rule_id: with_bad.rule_id,
+                                  kind: with_bad.kind, level: with_bad.level,
+                                  message: "m", message_markdown: "",
+                                  locations: [], related_locations: [], code_flows: [],
+                                  fixes: [SarifFix { description: "rename",
+                                                     changes: [SarifChange {
+                                                         artifact: sarifref.no_artifact(),
+                                                         replacements: [bounded] }] }],
+                                  suppressions: [], baseline: sarifresult.no_baseline(),
+                                  fingerprints: [], properties: [] }
+
+    test.case("and one over a named range is")
+    test.assert(sarifresult.fixes_are_bounded(with_good))
+
+    test.case("a result with no fixes is bounded vacuously")
+    test.assert(sarifresult.fixes_are_bounded(SarifResult { rule: with_bad.rule,
+        rule_id: "E1", kind: SarifKindFail, level: SarifLevelError, message: "m",
+        message_markdown: "", locations: [], related_locations: [], code_flows: [],
+        fixes: [], suppressions: [], baseline: sarifresult.no_baseline(),
+        fingerprints: [], properties: [] }))
+
+@test
+fn test_the_baseline_field_tells_absent_from_every_value() [io]
+    test.case("a run that was not compared to a baseline")
+    test.assert(not sarifresult.no_baseline().present)
+
+    test.case("a run that was")
+    let b = sarifresult.baseline(SarifBaselineUnchanged)
+    test.assert(b.present)
+    test.assert(b.state == SarifBaselineUnchanged)
+
+@test
+fn test_a_location_can_be_a_file_a_name_or_a_file_with_a_sentence() [io]
+    test.case("a place in a file")
+    let p = sarifresult.location(sarifref.no_artifact(),
+                                 sarifresult.text_region(1, 1, 1, 2))
+    test.assert(p.message == "")
+
+    test.case("with a sentence of its own, distinct from the result's")
+    let m = sarifresult.location_with_message(sarifref.no_artifact(),
+                                              sarifresult.text_region(1, 1, 1, 2),
+                                              "first defined here")
+    test.assert(m.message == "first defined here")
+
+    test.case("a named program element, with no file at all")
+    let l = sarifresult.logical_location(SarifLogicalRef { index: 0 })
+    test.assert(l.logical.index == 0)
+
+@test
+fn test_the_enum_names_round_trip_and_refuse_what_is_not_the_formats() [io]
+    test.case("every level writes and reads back")
+    test.assert(sarifref.level_from_name(sarifref.level_name(SarifLevelWarning))
+                == Some(SarifLevelWarning))
+    test.assert(sarifref.level_name(SarifLevelError) == "error")
+
+    test.case("every kind writes and reads back, including the camel-cased one")
+    test.assert(sarifref.kind_name(SarifKindNotApplicable) == "notApplicable")
+    test.assert(sarifref.kind_from_name("notApplicable") == Some(SarifKindNotApplicable))
+
+    test.case("a spelling the format does not have answers None rather than a default")
+    test.assert(sarifref.level_from_name("fatal") == None)
+    test.assert(sarifref.kind_from_name("broken") == None)
+
+    test.case("and so do the baseline states")
+    test.assert(sarifref.baseline_name(SarifBaselineNew) == "new")
+    test.assert(sarifref.baseline_from_name("nonsense") == None)
+
+    test.case("the suppression spellings are the format's")
+    test.assert(sarifref.suppression_kind_name(SarifSuppressionInSource) == "inSource")
+    test.assert(sarifref.suppression_status_name(SarifSuppressionUnderReview)
+                == "underReview")
+
+@test
+fn test_a_property_bag_is_an_arbitrary_object_and_tags_are_read_by_name() [io]
+    let ps = sarifref.with_property([], "security-severity", json.string("7.5"))
+
+    test.case("a property reads back")
+    match sarifref.property(ps, "security-severity")
+        None    => test.assert(false)
+        Some(v) => test.assert(json.to_str(v) == Some("7.5"))
+
+    test.case("setting the same name replaces rather than appends")
+    let again = sarifref.with_property(ps, "security-severity", json.string("9.0"))
+    test.assert(list.len(again) == 1)
+
+    test.case("tags are the one property consumers read, so they have a call")
+    let tagged = sarifref.with_property(again, "tags",
+                                        json.array([json.string("correctness")]))
+    test.assert(list.len(sarifref.property_tags(tagged)) == 1)
+
+    test.case("and a bag with no tags answers an empty list rather than None")
+    test.assert(list.len(sarifref.property_tags([])) == 0)

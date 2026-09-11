@@ -1,0 +1,280 @@
+// sarifbuild.nv — the builder, and the only place an index is minted.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// THE CALL THIS MODULE EXISTS FOR is one line long:
+//
+//     b = sarifbuild.add_result(b, "E2004", SarifLevelError,
+//                               "src/parser.nv",
+//                               sarifresult.text_region(13, 1, 13, 9),
+//                               "no field `nmae` on `Token`")
+//
+// A compiler has a diagnostic with a code, a severity, a path, a span
+// and a sentence, and that is the whole of what it has.  Everything
+// SARIF wants beyond it — the artifact table, the rule table, the two
+// indices, the `$schema`, the run — is bookkeeping, and bookkeeping is
+// what a builder is for.
+//
+// INTERNING IS THE WHOLE JOB.  `add_result` looks the path up in the
+// artifact table, adds it if it is new, and puts the INDEX in the
+// result.  A tool that emitted ten thousand findings over two hundred
+// files writes two hundred URIs.  Do it by hand and the log is many
+// times the size, which is how a continuous-integration upload starts
+// being refused.
+//
+// AND IT IS WHY `SarifArtifactRef` HAS NO PUBLIC CONSTRUCTOR.  The only
+// ways to obtain one are `artifact` and `add_result`, both of which fill
+// the table as a side effect of answering, so a result naming an index
+// the run does not have is not a mistake this package can make.
+// `sarifref.no_artifact()` is the single exception and it is the absent
+// ref, which every table admits.
+//
+// EVERY CALL ANSWERS A NEW BUILDER.  `[mutate]` is a host effect and
+// this package is `core`, so a builder is threaded rather than mutated.
+// That reads heavier than a mutable one by exactly one `b =` per line,
+// and it buys a builder that can be forked — which is what a driver
+// running two analyses over one artifact table does.
+
+use sarifref
+use sarifresult
+use sarifrun
+
+// A run under construction.
+//
+// The tables are the run's; `finish` hands them over.  The fields are
+// public because a caller assembling something this module has no call
+// for — a second invocation, a taxonomy — reaches for them, and a
+// builder that hid its own answer would have made those callers rebuild
+// the run by hand.
+pub struct SarifBuilder
+    tool: sarifrun.SarifTool
+    artifacts: [sarifrun.SarifArtifact]
+    logical_locations: [sarifrun.SarifLogicalLocation]
+    results: [sarifresult.SarifResult]
+    invocations: [sarifrun.SarifInvocation]
+    uri_base_ids: [sarifrun.SarifUriBase]
+    properties: [sarifref.SarifProperty]
+
+// A builder for a tool with a name and a version.
+//
+// ```novo
+// use sarifbuild
+//
+// fn main() [io]
+//     let b = sarifbuild.builder("novo", "0.8.9")
+//     println(b.tool.driver.name)
+// ```
+pub fn builder(tool_name: Str, version: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.builder")
+
+// A builder whose driver also carries a documentation URI and a
+// semantic version.
+//
+// The four facts a consumer shows a person about the tool that produced
+// a log.  A separate call rather than four setters, because a builder
+// with setters lets a caller produce a log whose tool has a
+// documentation URI and no name.
+pub fn builder_with(tool_name: Str, version: Str, semantic_version: Str,
+                    information_uri: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.builder_with")
+
+// ── Interning ────────────────────────────────────────────────────────
+
+// The ref for a URI, adding it to the table if it is not there.
+//
+// THE CALL THE DESIGN RESTS ON.  Answering a builder AND a ref together
+// is what makes it impossible to get a ref without filling the table:
+// a signature that answered only the ref would have needed the table to
+// be mutable, and one that answered only the builder would have made
+// the caller search for the index it had just created.
+//
+// Equality is BYTE equality on the URI.  Not path normalisation: `./a`
+// and `a` are two artifacts to this package, deliberately, because
+// deciding they are one means knowing what the paths are relative to,
+// and SARIF's answer to that question is `uri_base_ids`, which the
+// consumer resolves.  `sarifjson.duplicate_artifacts` is how a caller
+// finds out it fed two spellings of one file.
+//
+// ```novo
+// use sarifbuild
+//
+// fn main() [io]
+//     let b = sarifbuild.builder("novo", "0.8.9")
+//     let p = sarifbuild.artifact(b, "src/main.nv")
+//     println("${p.1.index}")
+// ```
+pub fn artifact(b: SarifBuilder, uri: Str) -> (SarifBuilder, sarifref.SarifArtifactRef) []
+    todo("sarif-nv.sarifbuild.artifact")
+
+// The ref for a URI relative to a named base, adding it if it is new.
+//
+// Two artifacts with the same URI and different bases are two
+// artifacts, because they are two files.
+pub fn artifact_under(b: SarifBuilder, uri: Str,
+                      uri_base_id: Str) -> (SarifBuilder, sarifref.SarifArtifactRef) []
+    todo("sarif-nv.sarifbuild.artifact_under")
+
+// The ref for a rule of the driver, adding it if it is new.
+//
+// A rule already in the table is answered and NOT replaced: a tool that
+// declared a rule properly at startup and then mentioned its identifier
+// in a diagnostic should not have the help text overwritten by the
+// mention.  `set_rule` is the call that replaces, and it says so.
+pub fn rule(b: SarifBuilder, id: Str) -> (SarifBuilder, sarifref.SarifRuleRef) []
+    todo("sarif-nv.sarifbuild.rule")
+
+// Declare a rule with its descriptions, replacing any rule of the same
+// identifier.
+//
+// What a tool calls once per rule at startup, from its own diagnostic
+// registry.
+pub fn set_rule(b: SarifBuilder, r: sarifrun.SarifRule) -> (SarifBuilder, sarifref.SarifRuleRef) []
+    todo("sarif-nv.sarifbuild.set_rule")
+
+// Add a tool component — a plugin, a rule pack — and answer its
+// number.
+//
+// The number is what `SarifRuleRef.component` carries, and
+// `rule_of_component` is how a rule goes into it.
+pub fn extension(b: SarifBuilder, d: sarifrun.SarifDriver) -> (SarifBuilder, Int) []
+    todo("sarif-nv.sarifbuild.extension")
+
+// The ref for a rule of one component, adding it if it is new.
+//
+// Refuses a component number the builder does not have, by answering
+// `sarifref.no_rule()` — a `Result` here would make every call site of
+// a bookkeeping function unwrap, and a result that names no rule is
+// legal SARIF, which is the honest degradation.
+// `sarifjson.run_problems` reports it.
+pub fn rule_of_component(b: SarifBuilder, component: Int,
+                         id: Str) -> (SarifBuilder, sarifref.SarifRuleRef) []
+    todo("sarif-nv.sarifbuild.rule_of_component")
+
+// The ref for a logical location, adding it if it is new.
+pub fn logical(b: SarifBuilder,
+               l: sarifrun.SarifLogicalLocation) -> (SarifBuilder, sarifref.SarifLogicalRef) []
+    todo("sarif-nv.sarifbuild.logical")
+
+// Declare where a named base of relative URIs points.
+pub fn uri_base(b: SarifBuilder, id: Str, uri: Str, description: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.uri_base")
+
+// ── Adding results ───────────────────────────────────────────────────
+
+// One diagnostic, with everything SARIF needs around it filled in.
+//
+// THE CALL A COMPILER MAKES.  The rule is interned by identifier, the
+// file is interned by URI, the kind is `fail`, the level is the one
+// given, and the indices are consistent by construction.
+//
+// ```novo
+// use sarifbuild
+// use sarifresult
+//
+// fn main() [io]
+//     var b = sarifbuild.builder("novo", "0.8.9")
+//     b = sarifbuild.add_result(b, "E2004", SarifLevelError, "src/main.nv",
+//                               sarifresult.text_region(13, 1, 13, 9),
+//                               "no field `nmae` on `Token`")
+//     println("${b.results.len()}")
+// ```
+pub fn add_result(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel, file: Str,
+                  region: sarifresult.SarifRegion, message: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.add_result")
+
+// One result of a kind other than `fail`.
+//
+// The level is passed through `sarifref.level_for_kind`, so a `pass`
+// result cannot leave here carrying `error` — see that function for the
+// rule and for what breaks when an emitter ignores it.
+pub fn add_result_kind(b: SarifBuilder, rule_id: Str, kind: sarifref.SarifKind,
+                       level: sarifref.SarifLevel, file: Str, region: sarifresult.SarifRegion,
+                       message: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.add_result_kind")
+
+// A result the caller assembled itself.
+//
+// For everything `add_result` does not cover: code flows, fixes,
+// several locations, fingerprints.  The refs inside it must have come
+// from this builder; `sarifjson.result_problems` is what says so if
+// they did not.
+pub fn add(b: SarifBuilder, r: sarifresult.SarifResult) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.add")
+
+// A result with no location at all: a finding about the project.
+pub fn add_global(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel,
+                  message: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.add_global")
+
+// Attach a fix to the result added last.
+//
+// Last rather than by index, because a tool emits the fix as it emits
+// the diagnostic and an index would be a number it has to carry.  A
+// builder with no results answers itself unchanged.
+pub fn with_fix(b: SarifBuilder, f: sarifresult.SarifFix) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.with_fix")
+
+// Attach a fingerprint to the result added last.
+pub fn with_fingerprint(b: SarifBuilder, name: Str, value: Str) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.with_fingerprint")
+
+// Attach a baseline state to the result added last.
+pub fn with_baseline(b: SarifBuilder, state: sarifref.SarifBaseline) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.with_baseline")
+
+// Attach a suppression to the result added last.
+pub fn with_suppression(b: SarifBuilder, s: sarifresult.SarifSuppression) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.with_suppression")
+
+// ── Finishing ────────────────────────────────────────────────────────
+
+// Record what ran.
+//
+// The timestamps are the caller's, in RFC 3339 UTC; a `core` package
+// has no clock.  `sarifrun.timestamp_ok` is the check.
+pub fn invocation(b: SarifBuilder, i: sarifrun.SarifInvocation) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.invocation")
+
+// Set a property on the run.
+pub fn set_property(b: SarifBuilder, name: Str, value: JsonValueH) -> SarifBuilder []
+    todo("sarif-nv.sarifbuild.set_property")
+
+// The run.
+pub fn finish(b: SarifBuilder) -> sarifrun.SarifRun []
+    todo("sarif-nv.sarifbuild.finish")
+
+// The run, wrapped in a log of one run.
+//
+// What a tool writing a `.sarif` file calls, and the reason `finish`
+// exists separately is a job producing several runs into one log.
+pub fn finish_log(b: SarifBuilder) -> sarifrun.SarifLog []
+    todo("sarif-nv.sarifbuild.finish_log")
+
+// A log from several runs.
+pub fn log_of(runs: [sarifrun.SarifRun]) -> sarifrun.SarifLog []
+    todo("sarif-nv.sarifbuild.log_of")
+
+// Two runs of the same tool as one.
+//
+// RE-INTERNS rather than concatenating, because a ref is an index into
+// one run's tables and a concatenation would leave every result of the
+// second run pointing at the first run's files.  That is the bug this
+// call exists to make unwritable, and it is the reason merging is a
+// published operation rather than a caller's list append.
+//
+// The two runs' rules are matched by identifier: two declarations of
+// `E2004` become one rule, and the first one's descriptions win, which
+// is the same precedence `rule` uses.
+pub fn merge(a: sarifrun.SarifRun, b: sarifrun.SarifRun) -> sarifrun.SarifRun []
+    todo("sarif-nv.sarifbuild.merge")
+
+// How many artifacts the builder has interned.
+//
+// The number a test asserts to show that interning happened: ten
+// results over two files answer 2.
+pub fn artifact_count(b: SarifBuilder) -> Int []
+    todo("sarif-nv.sarifbuild.artifact_count")
+
+// How many rules the builder has interned, across every component.
+pub fn rule_count(b: SarifBuilder) -> Int []
+    todo("sarif-nv.sarifbuild.rule_count")

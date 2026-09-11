@@ -1,0 +1,346 @@
+// sarifresult.nv — one finding, and everywhere it can point.
+//
+// Every body here is a `todo()`; the signatures are the design.
+//
+// A REGION HAS THREE COORDINATE SYSTEMS AND THEY ARE NOT
+// INTERCHANGEABLE.  SARIF § 3.30 lets a region be expressed as a text
+// region (1-based `startLine` / `startColumn`), as a character region
+// (0-based `charOffset` / `charLength`), or as a binary region
+// (`byteOffset` / `byteLength`), and a document may carry more than one
+// of them for the same region.  The trap is that a consumer picks
+// whichever it understands: an emitter that wrote a byte offset into
+// `charOffset` produces a document that validates and highlights the
+// wrong text in every viewer that prefers character regions.
+//
+// So `SarifRegion` carries all three, each with its own absent value,
+// and `region_has_text` / `region_has_chars` / `region_has_bytes` are
+// how a caller asks which ones are real.  A region with none of them is
+// legal and means the whole artifact.
+//
+// COLUMNS ARE 1-BASED AND OFFSETS ARE 0-BASED, which is the
+// specification's own asymmetry rather than this package's, and
+// `region_from_span` is published precisely because converting between
+// them by hand is where the off-by-one lives.
+//
+// WHAT A LOCATION IS.  A physical location (an artifact and a region),
+// a logical one (a named place in the program), or both — and a result
+// may carry several, because "this call and this declaration" is one
+// finding about two places.  `related_locations` is the other list, and
+// the distinction the format draws is that the `locations` are where
+// the problem IS and the related ones are context.
+
+use sarifref
+
+// A range inside an artifact.
+//
+// Every field has an absent value and the three coordinate systems are
+// independent; see the module header.
+pub struct SarifRegion
+    // 1-based line of the first character, or 0 for absent.
+    start_line: Int
+    // 1-based column of the first character, or 0 for absent.
+    start_column: Int
+    // 1-based line of the character AFTER the last one, or 0.
+    end_line: Int
+    // 1-based column of the character AFTER the last one, or 0.
+    end_column: Int
+    // 0-based character offset, or -1 for absent.
+    char_offset: Int
+    // Length in characters, or -1.
+    char_length: Int
+    // 0-based byte offset, or -1 for absent.
+    byte_offset: Int
+    // Length in bytes, or -1.
+    byte_length: Int
+    // The text the region covers, when the tool has it.  Optional in
+    // the format and worth writing: a log read six months later against
+    // a moved file shows a person what the finding was about.
+    snippet: Str
+
+// A place in a file.
+pub struct SarifPhysical
+    artifact: sarifref.SarifArtifactRef
+    // Where in it.  A region with nothing set means the whole file.
+    region: SarifRegion
+    // A larger region for display — the enclosing function, say — so a
+    // viewer can show context without guessing at it.  Nothing set
+    // means there is none.
+    context_region: SarifRegion
+
+// A place a result points at: a file, a named program element, or both.
+pub struct SarifLocation
+    physical: SarifPhysical
+    // -1 when there is no logical location, which is the common case.
+    logical: sarifref.SarifLogicalRef
+    // A sentence about THIS location, distinct from the result's own
+    // message: "first defined here".
+    message: Str
+
+// One finding.
+//
+// `rule` and the artifact refs inside `locations` are indices into the
+// run that holds this result — see `sarifref`'s header for why that is
+// the design rather than an inlined URI.
+pub struct SarifResult
+    rule: sarifref.SarifRuleRef
+    // The rule's identifier, repeated.  SARIF carries both `ruleId` and
+    // `ruleIndex` and this package writes both, because a consumer that
+    // reads only the string still works and a consumer that reads only
+    // the index is the fast one.  `sarifbuild` is what keeps them in
+    // step; a hand-built result that disagrees is what
+    // `sarifjson.result_problems` reports.
+    rule_id: Str
+    kind: sarifref.SarifKind
+    level: sarifref.SarifLevel
+    // The sentence a person reads.
+    message: Str
+    // The same sentence as Markdown, when the tool has one.  Empty
+    // otherwise; a consumer falls back to `message`.
+    message_markdown: Str
+    // Where the problem is.  Several, when the finding is about
+    // several places at once.
+    locations: [SarifLocation]
+    // Context: the other places a reader needs to understand it.
+    related_locations: [SarifLocation]
+    // How the value got there.  Usually empty; a taint analysis fills
+    // it and a compiler diagnostic does not.
+    code_flows: [SarifCodeFlow]
+    // What would fix it.  Several, when there is more than one way.
+    fixes: [SarifFix]
+    // Why it is not being reported.  Empty means it is.
+    suppressions: [SarifSuppression]
+    // Whether it is new since the baseline.
+    baseline: SarifBaselineField
+    // A string that identifies this finding across runs, so a baseline
+    // can match it after the file moved.  Empty when the tool has none.
+    // The format calls it a partial fingerprint and lets a tool carry
+    // several; this package carries the list.
+    fingerprints: [SarifFingerprint]
+    // The result's own property bag.
+    properties: [sarifref.SarifProperty]
+
+// A result's baseline state, and whether it has one at all.
+//
+// A struct rather than a `?SarifBaseline` because the absent case is
+// the common one and has a meaning of its own — "this run was not
+// compared to a baseline" — which is different from every value the
+// enum can take.
+pub struct SarifBaselineField
+    present: Bool
+    state: sarifref.SarifBaseline
+
+// One fingerprint: a name and a value.
+//
+// SARIF's `partialFingerprints`, whose whole job is surviving a file
+// move: a consumer matches on the fingerprint rather than on the path,
+// so a result does not become "new" because somebody reorganised a
+// directory.
+pub struct SarifFingerprint
+    name: Str
+    value: Str
+
+// Why a result is not being reported.
+pub struct SarifSuppression
+    kind: sarifref.SarifSuppressionKind
+    status: sarifref.SarifSuppressionStatus
+    // A sentence: what the reviewer said.
+    justification: Str
+    // Where the suppression is written, for an in-source one.
+    location: SarifLocation
+
+// How a value reached the place the result is about.
+//
+// A taint analysis's evidence.  Several thread flows when the path
+// crosses threads; one otherwise.
+pub struct SarifCodeFlow
+    message: Str
+    thread_flows: [SarifThreadFlow]
+
+// One sequential path through the program.
+pub struct SarifThreadFlow
+    // Which thread, when the analysis tracked that.  Empty otherwise.
+    id: Str
+    message: Str
+    locations: [SarifFlowStep]
+
+// One step of a flow.
+pub struct SarifFlowStep
+    location: SarifLocation
+    // How far into the flow this step is.  SARIF's own field, and it
+    // is separate from the list index because a consumer may merge
+    // flows and the number is what orders the result.
+    execution_order: Int
+    // How deep in the call stack.  -1 when not tracked.
+    nesting_level: Int
+    // SARIF's `importance`: `essential`, `important`, `unimportant` —
+    // what a viewer collapses by default.
+    importance: Str
+
+// A change that would fix a result.
+//
+// A fix is a set of changes across artifacts, because renaming a symbol
+// touches the declaration and every use, and a consumer that applied
+// half of one produces a file that does not compile.
+pub struct SarifFix
+    description: Str
+    changes: [SarifChange]
+
+// The changes to one artifact.
+pub struct SarifChange
+    artifact: sarifref.SarifArtifactRef
+    replacements: [SarifReplacement]
+
+// One replacement inside one artifact.
+//
+// `deleted_region` and `inserted_text` together: a deletion is an empty
+// `inserted_text`, an insertion is a zero-length `deleted_region`, and
+// a replacement is both.  The format has no third field and neither
+// does this.
+pub struct SarifReplacement
+    deleted_region: SarifRegion
+    inserted_text: Str
+
+// ── Building the small values ────────────────────────────────────────
+
+// A region with nothing set: the whole artifact.
+//
+// ```novo
+// use sarifresult
+//
+// fn main() [io]
+//     println("${sarifresult.region_has_text(sarifresult.whole_artifact())}")
+// ```
+pub fn whole_artifact() -> SarifRegion []
+    todo("sarif-nv.sarifresult.whole_artifact")
+
+// A region from 1-based line and column coordinates.
+//
+// The call a compiler makes, because a compiler's own diagnostics are
+// in exactly these coordinates.
+//
+// ```novo
+// use sarifresult
+//
+// fn main() [io]
+//     let r = sarifresult.text_region(13, 1, 13, 9)
+//     println("${r.start_line}")
+// ```
+pub fn text_region(start_line: Int, start_col: Int, end_line: Int, end_col: Int) -> SarifRegion []
+    todo("sarif-nv.sarifresult.text_region")
+
+// A region from a 0-based character offset and a length.
+pub fn char_region(offset: Int, length: Int) -> SarifRegion []
+    todo("sarif-nv.sarifresult.char_region")
+
+// A region from a 0-based byte offset and a length.
+//
+// The one a parser has, and the one that must not be written into a
+// character region: see the module header.
+pub fn byte_region(offset: Int, length: Int) -> SarifRegion []
+    todo("sarif-nv.sarifresult.byte_region")
+
+// A region from a half-open byte span, as every scanner in this project
+// answers one.
+//
+// `[start, end)` in bytes, converted to SARIF's offset-and-length form.
+// Published because the conversion is one subtraction and the place
+// off-by-ones live.
+pub fn region_from_span(start: Int, end: Int) -> SarifRegion []
+    todo("sarif-nv.sarifresult.region_from_span")
+
+// A region with a snippet attached.
+pub fn with_snippet(r: SarifRegion, snippet: Str) -> SarifRegion []
+    todo("sarif-nv.sarifresult.with_snippet")
+
+// Whether a region carries 1-based line and column coordinates.
+pub fn region_has_text(r: SarifRegion) -> Bool []
+    todo("sarif-nv.sarifresult.region_has_text")
+
+// Whether a region carries a character offset.
+pub fn region_has_chars(r: SarifRegion) -> Bool []
+    todo("sarif-nv.sarifresult.region_has_chars")
+
+// Whether a region carries a byte offset.
+pub fn region_has_bytes(r: SarifRegion) -> Bool []
+    todo("sarif-nv.sarifresult.region_has_bytes")
+
+// Whether a region says nothing, and therefore means the whole
+// artifact.
+pub fn region_is_whole(r: SarifRegion) -> Bool []
+    todo("sarif-nv.sarifresult.region_is_whole")
+
+// Whether two regions are the same range in the same coordinates.
+//
+// A comparison of what is SET, so a text region and a byte region over
+// the same characters are not equal — because this package cannot know
+// they are, having never seen the file.
+pub fn region_eq(a: SarifRegion, b: SarifRegion) -> Bool []
+    todo("sarif-nv.sarifresult.region_eq")
+
+// A location in one artifact, at one region.
+pub fn location(a: sarifref.SarifArtifactRef, r: SarifRegion) -> SarifLocation []
+    todo("sarif-nv.sarifresult.location")
+
+// A location with a sentence of its own.
+pub fn location_with_message(a: sarifref.SarifArtifactRef, r: SarifRegion,
+                             message: Str) -> SarifLocation []
+    todo("sarif-nv.sarifresult.location_with_message")
+
+// A location that names a program element rather than a place in a
+// file.
+pub fn logical_location(l: sarifref.SarifLogicalRef) -> SarifLocation []
+    todo("sarif-nv.sarifresult.logical_location")
+
+// The baseline field for a run that was not compared to a baseline.
+pub fn no_baseline() -> SarifBaselineField []
+    todo("sarif-nv.sarifresult.no_baseline")
+
+// The baseline field for a state the tool determined.
+pub fn baseline(state: sarifref.SarifBaseline) -> SarifBaselineField []
+    todo("sarif-nv.sarifresult.baseline")
+
+// ── Reading a result ─────────────────────────────────────────────────
+
+// The first location of a result, or `None` when it has none.
+//
+// A result with no location is legal — a finding about the project as a
+// whole — and this is how a consumer that only handles the common case
+// says so.
+pub fn primary_location(r: SarifResult) -> ?SarifLocation []
+    todo("sarif-nv.sarifresult.primary_location")
+
+// Whether a result is being reported: it has no suppression whose
+// status is accepted.
+//
+// The question a gate asks, and the reason it is not
+// `suppressions == []`: a suppression somebody requested and nobody
+// approved leaves the finding in force.
+pub fn is_reported(r: SarifResult) -> Bool []
+    todo("sarif-nv.sarifresult.is_reported")
+
+// Whether a result would fail a build under the usual gate: reported,
+// kind `fail`, and level at or above `min`.
+//
+// One call because the three-part condition is where a pipeline's own
+// logic silently disagrees with the next pipeline's.
+pub fn fails_at(r: SarifResult, min: sarifref.SarifLevel) -> Bool []
+    todo("sarif-nv.sarifresult.fails_at")
+
+// A fingerprint's value by name, or the empty string.
+pub fn fingerprint(r: SarifResult, name: Str) -> Str []
+    todo("sarif-nv.sarifresult.fingerprint")
+
+// How many artifacts a result and its fixes touch, counted once each.
+//
+// What a consumer sizes a checkout against before applying a fix.
+pub fn touched_artifacts(r: SarifResult) -> [sarifref.SarifArtifactRef] []
+    todo("sarif-nv.sarifresult.touched_artifacts")
+
+// Whether every replacement of every fix is inside a region that says
+// where it is.
+//
+// A fix whose replacement names the whole artifact deletes the file,
+// which is a thing tools have shipped.  `sarifjson.problems` reports it; this
+// is the predicate it reports on.
+pub fn fixes_are_bounded(r: SarifResult) -> Bool []
+    todo("sarif-nv.sarifresult.fixes_are_bounded")
