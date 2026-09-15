@@ -1,6 +1,6 @@
 [package]
 name        = "sarif-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "SARIF 2.1.0 as a typed value: runs, the tool and its rules, results with locations, regions, code flows, fixes and suppressions, written to and read from the standard library's JSON value.  A location names an artifact by INDEX into the run's own table, and the builder is what makes that index the only way to name one — so a run of ten thousand findings over two hundred files carries two hundred URIs.  Interface only — every body is a todo()."
 license     = "Apache-2.0"
 

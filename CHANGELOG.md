@@ -5,6 +5,10 @@ All notable changes to sarif-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.0.2 — 2026-09-15
+
+README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1 — 2026-09-11
 
 The **interface**: every signature and every effect row, and no bodies.
@@ -53,3 +57,36 @@ The **interface**: every signature and every effect row, and no bodies.
   the caller's strings with `timestamp_ok` beside them.
 - **`@tier(embedded)` is not claimed**, and the README says why.
 - The scaffold's `src/sarif.nv` was dropped for six prefixed modules.
+
+### Design notes
+
+- **The consumers this interface was shaped for.** `novo build --review`
+  and `novo ci` print `path:line: severity: [category] message` to
+  stderr, which nothing can consume: a pull request cannot annotate a
+  line from it and a pipeline cannot compare two runs of it. That is a
+  run with one artifact, one rule per category and one result per
+  finding. `novols`'s `diagnostic` record is already a text region, a
+  level and a rule identifier, so the same record writes as a SARIF
+  result through `sarifresult.text_region` and `sarifbuild.add_result`;
+  the one line of code needed is the mapping from LSP's severities 1..4
+  to SARIF's four names. `novo doc --errors --json` writes every
+  `error_kind` with its code, which is `tool.driver.rules` through
+  `sarifbuild.set_rule`. A shard audit run emits rows with a name, a
+  verdict and a site list, which is a rule per row and a result per
+  site.
+- **`novo bugs list --json` is deliberately not a consumer.** A bug
+  tracker's entries are not results of an analysis run, and pressing
+  them into `result` would produce a log whose `ruleId`s are issue
+  numbers.
+- **`novo lint` does not exist.** The toolchain's commands are
+  `novo build --review`, `novo ci` and `novo review show`, and the AI
+  review pass is what produces findings.
+- **The reading half is the smaller half.** What the consumers above
+  need is the writing half plus the artifact table. The reader exists
+  for a baseline comparison, which is the one thing a tool does with a
+  log it did not write.
+- **`serde-sarif` differs in two ways.** It derives its types from the
+  published JSON schema and therefore declares every object, including
+  the nine this package leaves out. And it leaves the artifact table to
+  the caller, where here the interning is the builder's whole job and
+  the reference type is what makes it unavoidable.
