@@ -5,6 +5,91 @@ All notable changes to sarif-nv are recorded here. The format is
 package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the pre-1.0 rule that a breaking change bumps the MINOR number.
 
+## 0.1.0 — 2026-10-11
+
+The **implementation**: every body the 0.0.1 interface stubbed. The
+signatures, the effect rows and the four published suites are unchanged;
+`stability` stays `experimental`, and the release is `implemented`.
+
+### Added
+
+- Every body under `src/`: the builder's interning and `merge`, the
+  region and location constructors, the eight checks `sarifjson.problems`
+  runs over a parsed log, and the `serde`-shaped writer and reader over
+  `std.json`'s `JsonValueH`.
+- `tests/sarifapi_tests.nv` — the calls a suite driven by a worked
+  example does not reach: the other spellings of every enumeration, the
+  region constructors that are not the one the example uses, and the
+  reads a gate makes over a run.
+- `tests/sarifedge_tests.nv` — one run with every optional member set,
+  pinned as a write-read-write round trip; the documents the reader
+  refuses, each with the JSON Pointer it refuses them at; and the faults
+  `problems` reports about a log that parsed anyway.
+
+### Changed
+
+- `sarifjson`'s reader threads the run's artifact table as a `var`
+  parameter rather than answering it beside the value, and
+  `sarifresult.location` builds its structs unqualified. Both are
+  workarounds for compiler defects and both are sighted where they
+  appear; see below.
+- The manifest's argument against a `url-nv` dependency credited a
+  `sarifuri` module that has never existed; it now names the three calls
+  that answer a caller's questions about a URI — `artifact_uri`,
+  `resolve_uri` and `uri_base_missing`.
+- Five unreachable guards were removed rather than excused: the
+  `let Some` arm in `too_deep_object` that `json.get` never takes, and
+  the `is_object` checks in `read_tool`, `read_tool_members`,
+  `inner_rule_index` and `read_component`, whose callers have already
+  checked.
+
+### Known
+
+- **Two regions carry `cov: skip`**, both with the reason at the site:
+  `with_logical_parent`'s out-of-range guard, which only a caller that
+  is not `intern_logicals` could reach, and `shape_member`'s final
+  `None`, which no shape in any of its tables falls through to. The
+  publish gate reports both as excused.
+- **`problem_is_serious` answers `true` for `SarifBadTimestamp`**, the
+  one variant the function's own sentence does not name. A timestamp
+  outside SARIF's RFC 3339 profile is worse than untidy — a build
+  service refuses the log — and it is not a wrong report either; the
+  reason is at the match arm. The three it answers `false` for are the
+  duplicate artifact, the duplicate rule and the orphan artifact.
+
+### Workarounds recorded here
+
+Three compiler defects, each sighted on its filing and each carrying
+`fixed_in: 0.20.3`. The installed toolchain is 0.20.2 and the floor is
+`>= 0.20.2`, so every shape below stays — a closed filing is not
+evidence that the toolchain in hand carries the fix, and the
+qualified-struct-literal refusal was re-checked against 0.20.2 and
+still refuses the literal. **Revert a workaround when the floor moves
+past 0.20.2 and the defect no longer reproduces.**
+
+- **A tuple bound out of a `Result` leaks**
+  (`language/a-tuple-bound-out-of-a-result-is-leaked`). The reader's
+  first shape answered `Result<(Value, [SarifArtifact]), SarifError>` to
+  thread the artifact table through the location readers; a suite that
+  printed every verdict green still exited 23, with the objects the
+  tuples held leaked. Every reader now writes the table through a `var`
+  parameter and answers one value.
+- **A list read from `??` and indexed in the same expression leaks the
+  element**
+  (`language/a-list-read-from-qq-and-indexed-in-one-expression-is-leaked`).
+  `sarifedge_tests` indexed a `json.get_list(...) ?? []` temporary in one
+  expression and turned a green suite into exit 23; the test now names
+  the list before indexing it.
+- **A module-qualified struct literal is a parse error**
+  (`language/a-qualified-struct-literal-is-a-parse-error`).
+  `sarifresult.location` builds `SarifPhysical` and `SarifLocation` by
+  their unqualified names, which `use` has in scope.
+- Two W0002 warnings remain in `src/sarifjson.nv`: the parameter `log`
+  in `write` and `problems` shadows the standard library's `log` module.
+  The name is the published interface's and is kept as published; the
+  two bindings that shadowed `ptr` the same way were locals and are
+  named `pointer` instead.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.

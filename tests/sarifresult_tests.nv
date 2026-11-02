@@ -1,9 +1,6 @@
 // sarifresult_tests.nv — three coordinate systems that are not
 // interchangeable, and the gate's own question.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
-//
 // THE ASSERTION THIS SUITE EXISTS FOR: a region built from a byte span
 // does NOT answer true to `region_has_chars`. An emitter that wrote a
 // byte offset into `charOffset` produces a document that validates and

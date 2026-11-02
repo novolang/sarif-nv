@@ -1,9 +1,6 @@
 // sarifrun_tests.nv — the questions a gate asks a run, and the one it
 // gets wrong.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
-//
 // THE ASSERTION THIS SUITE EXISTS FOR: a run with no results and a
 // FAILED invocation is not clean. A pipeline that read an empty result
 // list as "nothing was found" reports a clean build for a compiler that

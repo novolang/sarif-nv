@@ -8,10 +8,10 @@ editor reads it. This package brings SARIF 2.1.0 to novo-lang as a typed value,
 written to and read from the JSON value the standard library's `std.json`
 produces, with a builder shaped for a compiler.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
-its full signature, but every body is a `todo()` that panics when called. The
-package is published so its design can be reviewed and depended on before it is
-implemented. Version 0.1.0 will be the first working release.
+The four suites published with 0.0.1 are the specification, and
+`sarifapi_tests` and `sarifedge_tests` were added beside them: the first
+reaches the calls a suite driven by a worked example does not, the second
+the members nothing else sets and the documents the reader refuses.
 
 ## What it is
 
@@ -85,8 +85,7 @@ fn main() [io]
     println(sarifjson.write_text(sarifbuild.finish_log(b)))
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test` fails on
-purpose: every test reaches a `not implemented` panic.
+Build and test with `novo pkg build` and `novo test`.
 
 ## What the package contains
 
@@ -230,10 +229,6 @@ novo test tests/sarifrun_tests.nv          # the questions a gate asks a run
 novo test tests/sarifjson_tests.nv         # both directions, and the two error types
 ```
 
-`novo test` fails on purpose today. Every assertion reaches a `not implemented:
-sarif-nv.<module>.<fn>` panic, because every body is a `todo()`. The tests are
-the specification the implementation will have to satisfy.
-
 The vectors are the SARIF Technical Committee's own example documents from the
 specification's appendices and the sample logs of `sarif-tutorials`. The cases
 that exercise a rule an emitter breaks come from the validator test corpus of
@@ -245,39 +240,6 @@ region built from a byte span does not answer true to `region_has_chars`, that a
 run with no results and a failed invocation is not clean, and that reading
 refuses an out-of-range index while only reporting a `ruleId` that disagrees
 with its index.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `sarifref.SarifArtifactRef`, `.SarifRuleRef`, `.SarifLogicalRef`, `.SarifProperty` | declared |
-| `sarifref.SarifLevel`, `.SarifKind`, `.SarifBaseline`, `.SarifSuppressionKind`, `.SarifSuppressionStatus` | declared |
-| `sarifref`'s eight name and name-from-string functions | no |
-| `sarifref.level_ok`, `.level_for_kind` | no |
-| `sarifref.ref_absent`, `.no_artifact`, `.no_rule`, `.rule_ref_absent`, `.rule_ref_eq` | no |
-| `sarifref.property`, `.with_property`, `.property_tags` | no |
-| `sarifresult`'s thirteen types, from `SarifRegion` to `SarifReplacement` | declared |
-| `sarifresult`'s five region builders and five region predicates | no |
-| `sarifresult.location`, `.location_with_message`, `.logical_location` | no |
-| `sarifresult.no_baseline`, `.baseline`, `.primary_location`, `.is_reported`, `.fails_at` | no |
-| `sarifresult.fingerprint`, `.touched_artifacts`, `.fixes_are_bounded` | no |
-| `sarifrun`'s nine types, from `SarifLog` to `SarifUriBase` | declared |
-| `sarifrun.sarif_version`, `.schema_uri`, `.empty_log` | no |
-| `sarifrun.artifact_of`, `.rule_of`, `.logical_of`, `.rule_by_id` | no |
-| `sarifrun.artifact_uri`, `.resolve_uri`, `.uri_base_missing` | no |
-| `sarifrun.result_count`, `.level_counts`, `.failing`, `.new_results` | no |
-| `sarifrun.timestamp_ok`, `.run_is_clean`, `.invocations_succeeded` | no |
-| `sarifbuild.SarifBuilder` | declared |
-| `sarifbuild.builder`, `.builder_with` | no |
-| `sarifbuild.artifact`, `.artifact_under`, `.rule`, `.set_rule`, `.extension`, `.rule_of_component`, `.logical`, `.uri_base` | no |
-| `sarifbuild.add_result`, `.add_result_kind`, `.add`, `.add_global` | no |
-| `sarifbuild.with_fix`, `.with_fingerprint`, `.with_baseline`, `.with_suppression`, `.invocation`, `.set_property` | no |
-| `sarifbuild.finish`, `.finish_log`, `.log_of`, `.merge`, `.artifact_count`, `.rule_count` | no |
-| `sarifjson.default_depth`, `.write`, `.write_run`, `.write_text`, `.write_pretty`, `.write_to` | no |
-| `sarifjson.read`, `.read_with_depth`, `.read_text`, `.read_run`, `.round_trip`, `.unknown_members` | no |
-| `sarifjson.problems`, `.run_problems`, `.result_problems`, `.duplicate_artifacts`, `.is_sound` | no |
-| `sariferr.SarifError`, `.SarifProblem` and `impl Error for SarifError` | declared |
-| `sariferr.problem_message`, `.problem_is_serious`, `.error_pointer`, `.render` | no |
 
 ## Licence
 

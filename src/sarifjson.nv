@@ -1,7 +1,12 @@
 // sarifjson.nv — the log as JSON, both directions, and the checks that
 // belong beside them.
 //
-// Every body here is a `todo()`; the signatures are the design.
+// ABSENT AND NULL ARE TWO SPELLINGS OF NOTHING HERE.  `std.json`
+// distinguishes them — `json.get` answers `None` for a member that is
+// not in the object and a null value for one that is — and SARIF has no
+// null, so every member this package models reads as absent either way.
+// A property bag is the one place a null survives, because its values
+// are whatever JSON the caller put there.
 //
 // THE JSON VALUE IS THE STANDARD LIBRARY's.  `write` answers a
 // `JsonValueH` and `read` takes one, so a caller serialises with
@@ -20,7 +25,7 @@
 // SARIF's own schema makes almost everything optional, so a writer that
 // emitted `"snippet": ""` for every result would produce a document
 // several times the size that means exactly the same thing.  The one
-// exception is `"version"` and `"$schema"`, which are always written.
+// exception is `"version"` and `"\$schema"`, which are always written.
 //
 // WHAT A READER REFUSES AND WHAT IT ONLY REPORTS is `sariferr`'s
 // header, and it is the interesting decision in this module: a
@@ -30,8 +35,1988 @@
 // tools that write SARIF break that rule constantly, and a reader that
 // refused could not be pointed at a real repository.
 
+use sarifref
+use sarifresult
 use sarifrun
 use sariferr
+
+// ── Private helpers for writing ──────────────────────────────────────
+
+// A JSON object member that is always written.
+fn with_value(pairs: [Any], name: Str, value: Any) -> [Any]
+    var out = pairs[:]
+    list.push(out, (name, value))
+    out
+
+// A JSON object member for a string: omitted when the string is empty.
+fn with_str(pairs: [Any], name: Str, value: Str) -> [Any]
+    if value == ""
+        return pairs[:]
+    with_value(pairs, name, json.string(value))
+
+// A JSON object member for a number: omitted when it is negative, which
+// is the absent value every offset, length and index here uses.
+fn with_num(pairs: [Any], name: Str, value: Int) -> [Any]
+    if value < 0
+        return pairs[:]
+    with_value(pairs, name, json.int(value))
+
+// A JSON object member for a 1-based number: omitted when it is zero,
+// which is the absent value of a region's line and column.
+fn with_pos(pairs: [Any], name: Str, value: Int) -> [Any]
+    if value <= 0
+        return pairs[:]
+    with_value(pairs, name, json.int(value))
+
+// A JSON array member: omitted when there is nothing in it.  This is
+// the rule the suite names — an empty `results` is not written at all,
+// because an empty list and an absent one are different documents to a
+// reader.
+fn with_list(pairs: [Any], name: Str, items: [Any]) -> [Any]
+    if list.len(items) == 0
+        return pairs[:]
+    with_value(pairs, name, json.array(items))
+
+// A JSON array of strings: omitted when there is nothing in it.
+fn with_strings(pairs: [Any], name: Str, xs: [Str]) -> [Any]
+    var items: [Any] = list.map(xs, x => json.string(x))
+    with_list(pairs, name, items)
+
+// A message as a JSON object: SARIF wraps a sentence in `{"text": …}`,
+// and carries a Markdown one beside it when the tool has it.
+fn json_message(text: Str, markdown: Str) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "text", text)
+    pairs = with_str(pairs, "markdown", markdown)
+    json.object(pairs)
+
+// A JSON member that is a message object: omitted when the sentence is
+// empty.
+fn with_text(pairs: [Any], name: Str, text: Str) -> [Any]
+    if text == ""
+        return pairs[:]
+    with_value(pairs, name, json_message(text, ""))
+
+// A property bag as a JSON object.  The values are the caller's JSON
+// values, written as they stand — a bag is the one place this package
+// does not look inside.
+fn json_properties(ps: [sarifref.SarifProperty]) -> JsonValueH
+    var pairs: [Any] = list.map(ps, p => (p.name, p.value))
+    json.object(pairs)
+
+// A JSON member for a property bag: omitted when the bag is empty.
+fn with_properties(pairs: [Any], ps: [sarifref.SarifProperty]) -> [Any]
+    if list.len(ps) == 0
+        return pairs[:]
+    with_value(pairs, "properties", json_properties(ps))
+
+// A region as a JSON object: every coordinate the region has, and
+// nothing for the ones it does not.
+fn json_region(r: sarifresult.SarifRegion) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_pos(pairs, "startLine", r.start_line)
+    pairs = with_pos(pairs, "startColumn", r.start_column)
+    pairs = with_pos(pairs, "endLine", r.end_line)
+    pairs = with_pos(pairs, "endColumn", r.end_column)
+    pairs = with_num(pairs, "charOffset", r.char_offset)
+    pairs = with_num(pairs, "charLength", r.char_length)
+    pairs = with_num(pairs, "byteOffset", r.byte_offset)
+    pairs = with_num(pairs, "byteLength", r.byte_length)
+    pairs = with_str(pairs, "snippet", r.snippet)
+    json.object(pairs)
+
+// An artifact's own location: the URI, and the base it is relative to.
+fn json_artifact_location(a: sarifrun.SarifArtifact) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "uri", a.uri)
+    pairs = with_str(pairs, "uriBaseId", a.uri_base_id)
+    json.object(pairs)
+
+// An artifact as a JSON object, in the shape the run's table holds it:
+// the URI lives in `location`, not on the artifact itself.
+fn json_artifact(a: sarifrun.SarifArtifact) -> JsonValueH
+    var pairs: [Any] = []
+    if a.uri != "" or a.uri_base_id != ""
+        pairs = with_value(pairs, "location", json_artifact_location(a))
+    pairs = with_str(pairs, "mimeType", a.mime_type)
+    pairs = with_num(pairs, "length", a.length)
+    pairs = with_strings(pairs, "roles", a.roles)
+    json.object(pairs)
+
+// A reference into the run's artifact table: the index, and nothing
+// else.  THE POINT OF THE WHOLE PACKAGE, in six lines — a result names
+// a file by its position in the table and never by its path, so ten
+// thousand findings over two hundred files carry two hundred URIs.
+fn json_index_ref(index: Int) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_num(pairs, "index", index)
+    json.object(pairs)
+
+// Whether a physical location says anything.  One that does not is left
+// out entirely rather than written as `{}`.
+fn physical_is_empty(p: sarifresult.SarifPhysical) -> Bool
+    p.artifact.index < 0 and sarifresult.region_is_whole(p.region)
+        and sarifresult.region_is_whole(p.context_region)
+
+// A physical location: the artifact by index, and the regions that say
+// where in it.
+fn json_physical(p: sarifresult.SarifPhysical) -> JsonValueH
+    var pairs: [Any] = []
+    if p.artifact.index >= 0
+        pairs = with_value(pairs, "artifactLocation", json_index_ref(p.artifact.index))
+    if not sarifresult.region_is_whole(p.region)
+        pairs = with_value(pairs, "region", json_region(p.region))
+    if not sarifresult.region_is_whole(p.context_region)
+        pairs = with_value(pairs, "contextRegion", json_region(p.context_region))
+    json.object(pairs)
+
+// A location: where it is, what it is called, and what it says.
+fn json_location(l: sarifresult.SarifLocation) -> JsonValueH
+    var pairs: [Any] = []
+    if not physical_is_empty(l.physical)
+        pairs = with_value(pairs, "physicalLocation", json_physical(l.physical))
+    if l.logical.index >= 0
+        var one: [Any] = []
+        one = list.push(one, json_index_ref(l.logical.index))
+        pairs = with_value(pairs, "logicalLocations", json.array(one))
+    pairs = with_text(pairs, "message", l.message)
+    json.object(pairs)
+
+// A list of locations as a JSON array.
+fn json_locations(locs: [sarifresult.SarifLocation]) -> JsonValueH
+    var items: [Any] = list.map(locs, l => json_location(l))
+    json.array(items)
+
+// A JSON member for a list of locations: omitted when the list is
+// empty.
+fn with_locations(pairs: [Any], name: Str, locs: [sarifresult.SarifLocation]) -> [Any]
+    if list.len(locs) == 0
+        return pairs[:]
+    with_value(pairs, name, json_locations(locs))
+
+// One step of a code flow.
+fn json_flow_step(s: sarifresult.SarifFlowStep) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_value(pairs, "location", json_location(s.location))
+    pairs = with_num(pairs, "executionOrder", s.execution_order)
+    pairs = with_num(pairs, "nestingLevel", s.nesting_level)
+    pairs = with_str(pairs, "importance", s.importance)
+    json.object(pairs)
+
+// One sequential path through the program.
+fn json_thread_flow(t: sarifresult.SarifThreadFlow) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "id", t.id)
+    pairs = with_text(pairs, "message", t.message)
+    var items: [Any] = list.map(t.locations, s => json_flow_step(s))
+    pairs = with_list(pairs, "locations", items)
+    json.object(pairs)
+
+// How a value reached the place the result is about.
+fn json_code_flow(f: sarifresult.SarifCodeFlow) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_text(pairs, "message", f.message)
+    var items: [Any] = list.map(f.thread_flows, t => json_thread_flow(t))
+    pairs = with_list(pairs, "threadFlows", items)
+    json.object(pairs)
+
+// One replacement inside one artifact.  A replacement whose region says
+// nothing is written without a `deletedRegion`, which is exactly the
+// document that deletes a file — see `sariferr.SarifUnboundedFix`.
+fn json_replacement(rep: sarifresult.SarifReplacement) -> JsonValueH
+    var pairs: [Any] = []
+    if not sarifresult.region_is_whole(rep.deleted_region)
+        pairs = with_value(pairs, "deletedRegion", json_region(rep.deleted_region))
+    if rep.inserted_text != ""
+        var content: [Any] = []
+        content = with_str(content, "text", rep.inserted_text)
+        pairs = with_value(pairs, "insertedContent", json.object(content))
+    json.object(pairs)
+
+// The changes to one artifact.
+fn json_change(c: sarifresult.SarifChange) -> JsonValueH
+    var pairs: [Any] = []
+    if c.artifact.index >= 0
+        pairs = with_value(pairs, "artifactLocation", json_index_ref(c.artifact.index))
+    var items: [Any] = list.map(c.replacements, rep => json_replacement(rep))
+    pairs = with_list(pairs, "replacements", items)
+    json.object(pairs)
+
+// A change that would fix a result.
+fn json_fix(f: sarifresult.SarifFix) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_text(pairs, "description", f.description)
+    var items: [Any] = list.map(f.changes, c => json_change(c))
+    pairs = with_list(pairs, "artifactChanges", items)
+    json.object(pairs)
+
+// Why a result is not being reported.  `kind` and `status` are
+// enumerations and are always written: a consumer that read a
+// suppression without a status would have to guess, and the format's
+// default is the wrong guess for a finding somebody asked to hide.
+fn json_suppression(s: sarifresult.SarifSuppression) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_value(pairs, "kind", json.string(sarifref.suppression_kind_name(s.kind)))
+    pairs = with_value(pairs, "status",
+                       json.string(sarifref.suppression_status_name(s.status)))
+    pairs = with_str(pairs, "justification", s.justification)
+    if s.location.message != "" or not physical_is_empty(s.location.physical)
+        pairs = with_value(pairs, "location", json_location(s.location))
+    json.object(pairs)
+
+// The partial fingerprints as a JSON object: name to value.
+fn json_fingerprints(fps: [sarifresult.SarifFingerprint]) -> JsonValueH
+    var pairs: [Any] = list.map(fps, f => (f.name, json.string(f.value)))
+    json.object(pairs)
+
+// A JSON member for the partial fingerprints: omitted when there are
+// none.
+fn with_fingerprints(pairs: [Any], fps: [sarifresult.SarifFingerprint]) -> [Any]
+    if list.len(fps) == 0
+        return pairs[:]
+    with_value(pairs, "partialFingerprints", json_fingerprints(fps))
+
+// One rule of a component.  The default level lives in SARIF's
+// `defaultConfiguration` object, which is why it is a nested object and
+// not a member named `level`.
+fn json_rule(r: sarifrun.SarifRule) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "id", r.id)
+    pairs = with_str(pairs, "name", r.name)
+    pairs = with_text(pairs, "shortDescription", r.short_description)
+    pairs = with_text(pairs, "fullDescription", r.full_description)
+    var conf: [Any] = []
+    conf = with_value(conf, "level", json.string(sarifref.level_name(r.default_level)))
+    pairs = with_value(pairs, "defaultConfiguration", json.object(conf))
+    pairs = with_str(pairs, "helpUri", r.help_uri)
+    pairs = with_properties(pairs, r.properties)
+    json.object(pairs)
+
+// One component of a tool: the driver, or an extension.
+fn json_component(d: sarifrun.SarifDriver) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "name", d.name)
+    pairs = with_str(pairs, "version", d.version)
+    pairs = with_str(pairs, "semanticVersion", d.semantic_version)
+    pairs = with_str(pairs, "informationUri", d.information_uri)
+    var items: [Any] = list.map(d.rules, r => json_rule(r))
+    pairs = with_list(pairs, "rules", items)
+    json.object(pairs)
+
+// The tool that produced a run.
+fn json_tool(t: sarifrun.SarifTool) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_value(pairs, "driver", json_component(t.driver))
+    var items: [Any] = list.map(t.extensions, e => json_component(e))
+    pairs = with_list(pairs, "extensions", items)
+    json.object(pairs)
+
+// A named place in a program.
+fn json_logical(l: sarifrun.SarifLogicalLocation) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "name", l.name)
+    pairs = with_str(pairs, "fullyQualifiedName", l.fully_qualified_name)
+    pairs = with_str(pairs, "kind", l.kind)
+    pairs = with_num(pairs, "parentIndex", l.parent_index)
+    json.object(pairs)
+
+// What ran, and whether it worked.  `executionSuccessful` is a boolean
+// and has no absent value, so it is always written: a log whose empty
+// result list means "the analysis did not run" is a different document
+// from one where nothing was found.
+fn json_invocation(i: sarifrun.SarifInvocation) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "commandLine", i.command_line)
+    pairs = with_strings(pairs, "arguments", i.arguments)
+    pairs = with_value(pairs, "executionSuccessful", json.bool(i.successful))
+    pairs = with_num(pairs, "exitCode", i.exit_code)
+    pairs = with_str(pairs, "startTimeUtc", i.start_time_utc)
+    pairs = with_str(pairs, "endTimeUtc", i.end_time_utc)
+    if i.working_directory != ""
+        var wd: [Any] = []
+        wd = with_str(wd, "uri", i.working_directory)
+        pairs = with_value(pairs, "workingDirectory", json.object(wd))
+    json.object(pairs)
+
+// A named base for the relative URIs in a run.
+fn json_base(b: sarifrun.SarifUriBase) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "uri", b.uri)
+    pairs = with_text(pairs, "description", b.description)
+    json.object(pairs)
+
+// The rule a result names.
+//
+// Component 0 is the driver and the format's own `ruleIndex`.  A rule
+// of an extension is written as a `rule` object naming the component,
+// because `ruleIndex` alone is relative to the driver and a plugin's
+// rule 3 and the driver's rule 3 are two rules.
+fn with_rule_ref(pairs: [Any], r: sarifresult.SarifResult) -> [Any]
+    if r.rule.component == 0
+        return with_num(pairs, "ruleIndex", r.rule.index)
+    var comp: [Any] = []
+    comp = with_num(comp, "index", r.rule.component - 1)
+    var ref: [Any] = []
+    ref = with_num(ref, "index", r.rule.index)
+    ref = with_str(ref, "id", r.rule_id)
+    ref = with_value(ref, "toolComponent", json.object(comp))
+    with_value(pairs, "rule", json.object(ref))
+
+// One finding.
+fn json_result(r: sarifresult.SarifResult) -> JsonValueH
+    var pairs: [Any] = []
+    pairs = with_str(pairs, "ruleId", r.rule_id)
+    pairs = with_rule_ref(pairs, r)
+    pairs = with_value(pairs, "kind", json.string(sarifref.kind_name(r.kind)))
+    pairs = with_value(pairs, "level", json.string(sarifref.level_name(r.level)))
+    if r.message != "" or r.message_markdown != ""
+        pairs = with_value(pairs, "message", json_message(r.message, r.message_markdown))
+    pairs = with_locations(pairs, "locations", r.locations)
+    pairs = with_locations(pairs, "relatedLocations", r.related_locations)
+    var flows: [Any] = list.map(r.code_flows, f => json_code_flow(f))
+    pairs = with_list(pairs, "codeFlows", flows)
+    var fixes: [Any] = list.map(r.fixes, f => json_fix(f))
+    pairs = with_list(pairs, "fixes", fixes)
+    var sups: [Any] = list.map(r.suppressions, s => json_suppression(s))
+    pairs = with_list(pairs, "suppressions", sups)
+    if r.baseline.present
+        pairs = with_value(pairs, "baselineState",
+                           json.string(sarifref.baseline_name(r.baseline.state)))
+    pairs = with_fingerprints(pairs, r.fingerprints)
+    pairs = with_properties(pairs, r.properties)
+    json.object(pairs)
+
+// ── Private helpers for reading ──────────────────────────────────────
+
+// The member of an object, treating an absent member and a null one the
+// same — see the module header.  A property bag reads through
+// `json.get` and not through this, because a null there is a value.
+fn member(v: JsonValueH, name: Str) -> ?JsonValueH
+    let got = json.get(v, name)
+    let Some(x) = got else return None
+    if json.is_null(x)
+        return None
+    Some(x)
+
+// A string member, or the empty string.  Absent, null and a value of
+// another type are all the empty string: the reader is lenient about a
+// string it was not given and refuses only what it cannot place.
+fn str_member(v: JsonValueH, name: Str) -> Str
+    json.get_str(v, name) ?? ""
+
+// An integer member, or `absent` when it is not there.
+fn num_member(v: JsonValueH, name: Str, absent: Int) -> Int
+    json.get_int(v, name) ?? absent
+
+// Whether a value is a JSON object.
+fn is_object(v: JsonValueH) -> Bool
+    json.type_of(v) == "object"
+
+// The elements of an array member, or an empty list.  A member that is
+// present and is not an array is refused: its absence is not what it
+// is.
+fn list_member(v: JsonValueH, name: Str, ptr: Str) -> Result<[JsonValueH], sariferr.SarifError>
+    let found = member(v, name)
+    let Some(x) = found else return Ok([])
+    let Some(items) = json.to_list(x) else
+        return Err(SarifBadShape(ptr + "/" + name, "an array", json.type_of(x)))
+    Ok(items)
+
+// An object-valued member, or `None` when it is not there.  A member of
+// another type is refused.
+fn object_member(v: JsonValueH, name: Str, ptr: Str) -> Result<?JsonValueH, sariferr.SarifError>
+    let found = member(v, name)
+    let Some(x) = found else return Ok(None)
+    if not is_object(x)
+        return Err(SarifBadShape(ptr + "/" + name, "a JSON object", json.type_of(x)))
+    Ok(Some(x))
+
+// The first pointer, in document order, at which a value nests deeper
+// than `limit` levels — or `None` when it does not.
+//
+// THE RECURSION IS BOUNDED BY `limit`, not by the document: it stops at
+// the bound rather than at the bottom, so a hostile document is refused
+// instead of walked to a stack overflow.
+fn too_deep(v: JsonValueH, ptr: Str, level: Int, limit: Int) -> ?Str
+    if level > limit
+        return Some(ptr)
+    let items = json.to_list(v)
+    let Some(xs) = items else return too_deep_object(v, ptr, level, limit)
+    var i = 0
+    while i < list.len(xs)
+        let found = too_deep(xs[i], "${ptr}/${i}", level + 1, limit)
+        if found != None
+            return found
+        i = i + 1
+    None
+
+// The same walk over an object's members.
+fn too_deep_object(v: JsonValueH, ptr: Str, level: Int, limit: Int) -> ?Str
+    if not is_object(v)
+        return None
+    var i = 0
+    let names = json.keys(v)
+    while i < list.len(names)
+        // A key `keys` answered is a key with a value, so the null the
+        // `??` falls back to is unreachable and stands only for the
+        // type: `json.get` answers an optional where the walk wants a
+        // value, and a null nests no deeper, which is the walk of a
+        // member that is not there.
+        let x = json.get(v, names[i]) ?? json.null()
+        let found = too_deep(x, "${ptr}/${escape_key(names[i])}", level + 1, limit)
+        if found != None
+            return found
+        i = i + 1
+    None
+
+// One key of a member name, escaped for a JSON Pointer: RFC 6901 turns
+// `~` into `~0` and `/` into `~1`, which is what keeps a pointer
+// through a property bag readable.
+fn escape_key(k: Str) -> Str
+    str.replace(str.replace(k, "~", "~0"), "/", "~1")
+
+// The position a URI occupies in an artifact table, or -1.
+fn find_artifact(arts: [sarifrun.SarifArtifact], uri: Str, base: Str) -> Int
+    var i = 0
+    while i < list.len(arts)
+        let a = arts[i]
+        if a.uri == uri and a.uri_base_id == base
+            return i
+        i = i + 1
+    -1
+
+// The artifact table with one URI interned, and the position it landed
+// at — the reader's side of `sarifbuild.artifact`.
+//
+// A physical location may name its artifact by `uri` instead of by
+// `index`, and the format says it then need not be in the table at all.
+// Interning it is what keeps every ref a real index, which is the
+// invariant the whole package rests on.
+//
+// THE TABLE IS WRITTEN THROUGH THE PARAMETER rather than answered
+// beside the ref, and the reason is a compiler defect rather than
+// taste: in `Result<(T, [SarifArtifact]), SarifError>` a payload that is
+// a tuple, bound to a name, leaks the tuple and every object reachable
+// from it, so a reader that answered the table beside the value leaked
+// under `novo test`'s leak check (every verdict green, exit 23).  The
+// filing is `language/a-tuple-bound-out-of-a-result-is-leaked`; every
+// other reader here carries the artifact table the same way, for the
+// same reason.
+fn intern(var table: [sarifrun.SarifArtifact], uri: Str, base: Str) -> Int
+    let at = find_artifact(table, uri, base)
+    if at >= 0
+        return at
+    list.push(table, SarifArtifact { uri: uri, uri_base_id: base, mime_type: "",
+                                     length: -1, roles: [] })
+    list.len(table) - 1
+
+// What a reader needs to know that does not change while a run is read:
+// the tool its rule refs point into, and how many logical locations the
+// run declared.  Read-only, so it travels as a plain parameter.
+struct ReadCtx
+    tool: sarifrun.SarifTool
+    logical_count: Int
+
+// A physical location that names nothing and covers nothing.
+fn empty_physical() -> sarifresult.SarifPhysical
+    SarifPhysical { artifact: sarifref.no_artifact(),
+                    region: sarifresult.whole_artifact(),
+                    context_region: sarifresult.whole_artifact() }
+
+// A location that names nothing.
+fn empty_location() -> sarifresult.SarifLocation
+    SarifLocation { physical: empty_physical(), logical: SarifLogicalRef { index: -1 },
+                    message: "" }
+
+// A region out of a JSON object.
+fn read_region(v: JsonValueH) -> sarifresult.SarifRegion
+    SarifRegion { start_line: num_member(v, "startLine", 0),
+                  start_column: num_member(v, "startColumn", 0),
+                  end_line: num_member(v, "endLine", 0),
+                  end_column: num_member(v, "endColumn", 0),
+                  char_offset: num_member(v, "charOffset", -1),
+                  char_length: num_member(v, "charLength", -1),
+                  byte_offset: num_member(v, "byteOffset", -1),
+                  byte_length: num_member(v, "byteLength", -1),
+                  snippet: str_member(v, "snippet") }
+
+// A region-valued member, or the whole artifact when it is not there.
+fn region_member(v: JsonValueH, name: Str,
+                 ptr: Str) -> Result<sarifresult.SarifRegion, sariferr.SarifError>
+    let found = object_member(v, name, ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(rv) = obj else return Ok(sarifresult.whole_artifact())
+    Ok(read_region(rv))
+
+// The artifact a location names: the `index` the writer wrote, or a URI
+// interned into the table, or the absent ref.
+fn read_artifact_ref(v: JsonValueH, ptr: Str,
+                     var table: [sarifrun.SarifArtifact]) -> Result<sarifref.SarifArtifactRef, sariferr.SarifError>
+    let ix = json.get_int(v, "index")
+    let Some(n) = ix else return read_artifact_uri(v, var table)
+    if n < 0 or n >= list.len(table)
+        return Err(SarifIndexOutOfRange(ptr + "/index", n, list.len(table)))
+    Ok(SarifArtifactRef { index: n })
+
+// The artifact a location names when it names one by URI.
+fn read_artifact_uri(v: JsonValueH,
+                     var table: [sarifrun.SarifArtifact]) -> Result<sarifref.SarifArtifactRef, sariferr.SarifError>
+    let uri = str_member(v, "uri")
+    if uri == ""
+        return Ok(sarifref.no_artifact())
+    Ok(SarifArtifactRef { index: intern(var table, uri, str_member(v, "uriBaseId")) })
+
+// The text of a member SARIF writes as a message object where this
+// package carries one string.
+fn message_text(v: JsonValueH, name: Str, ptr: Str) -> Result<Str, sariferr.SarifError>
+    let found = object_member(v, name, ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(mv) = obj else return Ok("")
+    Ok(str_member(mv, "text"))
+
+// A message: the sentence and the Markdown beside it.
+struct Message
+    text: Str
+    markdown: Str
+
+// A result's own message.
+//
+// A struct and not a `(Str, Str)`: see `intern`.
+fn message_pair(v: JsonValueH, ptr: Str) -> Result<Message, sariferr.SarifError>
+    let found = object_member(v, "message", ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(mv) = obj else return Ok(Message { text: "", markdown: "" })
+    Ok(Message { text: str_member(mv, "text"), markdown: str_member(mv, "markdown") })
+
+// A result's kind.  Absent is `fail`, which is the format's own default.
+fn read_kind(v: JsonValueH, ptr: Str) -> Result<sarifref.SarifKind, sariferr.SarifError>
+    let found = member(v, "kind")
+    let Some(kv) = found else return Ok(SarifKindFail)
+    let Some(name) = json.to_str(kv) else
+        return Err(SarifBadShape(ptr + "/kind", "a string", json.type_of(kv)))
+    let parsed = sarifref.kind_from_name(name)
+    let Some(k) = parsed else return Err(SarifUnknownEnum(ptr + "/kind", "kind", name))
+    Ok(k)
+
+// A result's level.  Absent is `warning` for a failure and `none` for
+// every other kind, which is § 3.27.10 read as a default.
+fn read_level(v: JsonValueH, ptr: Str,
+              kind: sarifref.SarifKind) -> Result<sarifref.SarifLevel, sariferr.SarifError>
+    let found = member(v, "level")
+    let Some(lv) = found else
+        return Ok(default_level(kind))
+    let Some(name) = json.to_str(lv) else
+        return Err(SarifBadShape(ptr + "/level", "a string", json.type_of(lv)))
+    let parsed = sarifref.level_from_name(name)
+    let Some(l) = parsed else return Err(SarifUnknownEnum(ptr + "/level", "level", name))
+    Ok(l)
+
+// The level a result carries when it does not say.
+fn default_level(kind: sarifref.SarifKind) -> sarifref.SarifLevel
+    match kind
+        SarifKindFail => SarifLevelWarning
+        _             => SarifLevelNone
+
+// A result's baseline state, or the absent field.
+fn read_baseline(v: JsonValueH,
+                 ptr: Str) -> Result<sarifresult.SarifBaselineField, sariferr.SarifError>
+    let found = member(v, "baselineState")
+    let Some(bv) = found else return Ok(sarifresult.no_baseline())
+    let Some(name) = json.to_str(bv) else
+        return Err(SarifBadShape(ptr + "/baselineState", "a string", json.type_of(bv)))
+    let parsed = sarifref.baseline_from_name(name)
+    let Some(b) = parsed else
+        return Err(SarifUnknownEnum(ptr + "/baselineState", "baselineState", name))
+    Ok(sarifresult.baseline(b))
+
+// A property bag.  The one place a JSON null survives, because a bag's
+// values are the caller's own JSON — see the module header.
+fn read_properties(v: JsonValueH, ptr: Str) -> Result<[sarifref.SarifProperty], sariferr.SarifError>
+    let found = member(v, "properties")
+    let Some(pv) = found else return Ok([])
+    if not is_object(pv)
+        return Err(SarifBadShape(ptr + "/properties", "a JSON object", json.type_of(pv)))
+    var out: [sarifref.SarifProperty] = []
+    for k in json.keys(pv)
+        let got = json.get(pv, k)
+        let Some(item) = got else continue
+        out = list.push(out, SarifProperty { name: k, value: item })
+    Ok(out)
+
+// The partial fingerprints, in the order the document lists them.
+fn read_fingerprints(v: JsonValueH,
+                     ptr: Str) -> Result<[sarifresult.SarifFingerprint], sariferr.SarifError>
+    let found = member(v, "partialFingerprints")
+    let Some(fv) = found else return Ok([])
+    if not is_object(fv)
+        return Err(SarifBadShape(ptr + "/partialFingerprints", "a JSON object", json.type_of(fv)))
+    var out: [sarifresult.SarifFingerprint] = []
+    for k in json.keys(fv)
+        let got = json.get(fv, k)
+        let Some(item) = got else continue
+        let Some(s) = json.to_str(item) else
+            return Err(SarifBadShape("${ptr}/partialFingerprints/${k}", "a string",
+                                     json.type_of(item)))
+        out = list.push(out, SarifFingerprint { name: k, value: s })
+    Ok(out)
+
+// An array-valued member whose elements are strings.
+fn read_string_list(v: JsonValueH, name: Str, ptr: Str) -> Result<[Str], sariferr.SarifError>
+    let items_f = list_member(v, name, ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [Str] = []
+    var i = 0
+    while i < list.len(items)
+        let item = items[i]
+        let Some(s) = json.to_str(item) else
+            return Err(SarifBadShape("${ptr}/${name}/${i}", "a string", json.type_of(item)))
+        out = list.push(out, s)
+        i = i + 1
+    Ok(out)
+
+// A logical location out of a JSON object.
+fn read_logical(v: JsonValueH) -> sarifrun.SarifLogicalLocation
+    SarifLogicalLocation { name: str_member(v, "name"),
+                           fully_qualified_name: str_member(v, "fullyQualifiedName"),
+                           kind: str_member(v, "kind"),
+                           parent_index: num_member(v, "parentIndex", -1) }
+
+// A run's logical table.
+//
+// The parent indices are checked after the whole table is read, because
+// a parent may be declared after the child that names it.
+fn read_logicals(v: JsonValueH,
+                 ptr: Str) -> Result<[sarifrun.SarifLogicalLocation], sariferr.SarifError>
+    let items_f = list_member(v, "logicalLocations", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifrun.SarifLogicalLocation] = []
+    var i = 0
+    while i < list.len(items)
+        let item = items[i]
+        if not is_object(item)
+            return Err(SarifBadShape("${ptr}/logicalLocations/${i}", "a JSON object",
+                                     json.type_of(item)))
+        out = list.push(out, read_logical(item))
+        i = i + 1
+    var j = 0
+    while j < list.len(out)
+        let parent = out[j].parent_index
+        if parent >= list.len(out)
+            return Err(SarifIndexOutOfRange("${ptr}/logicalLocations/${j}/parentIndex",
+                                            parent, list.len(out)))
+        j = j + 1
+    Ok(out)
+
+// One artifact of a run, out of a JSON object: the URI lives in the
+// artifact's own `location`, which is the shape the format's table
+// uses.
+fn artifact_entry(v: JsonValueH, uri: Str, base: Str, roles: [Str]) -> sarifrun.SarifArtifact
+    SarifArtifact { uri: uri, uri_base_id: base, mime_type: str_member(v, "mimeType"),
+                    length: num_member(v, "length", -1), roles: roles }
+
+// One artifact of a run.
+fn read_artifact(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifArtifact, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let roles_f = read_string_list(v, "roles", ptr)
+    let roles = match roles_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let lf = object_member(v, "location", ptr)
+    let loc = match lf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    var uri = ""
+    var base = ""
+    let Some(lv) = loc else return Ok(artifact_entry(v, uri, base, roles))
+    uri = str_member(lv, "uri")
+    base = str_member(lv, "uriBaseId")
+    Ok(artifact_entry(v, uri, base, roles))
+
+// A rule's default level, from the format's `defaultConfiguration`
+// object.
+fn read_default_level(v: JsonValueH, ptr: Str) -> Result<sarifref.SarifLevel, sariferr.SarifError>
+    let found = object_member(v, "defaultConfiguration", ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(cv) = obj else return Ok(SarifLevelWarning)
+    let lv = member(cv, "level")
+    let Some(l) = lv else return Ok(SarifLevelWarning)
+    let Some(name) = json.to_str(l) else
+        return Err(SarifBadShape(ptr + "/defaultConfiguration/level", "a string",
+                                 json.type_of(l)))
+    let parsed = sarifref.level_from_name(name)
+    let Some(x) = parsed else
+        return Err(SarifUnknownEnum(ptr + "/defaultConfiguration/level", "level", name))
+    Ok(x)
+
+// One rule of a component.
+fn read_rule(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifRule, sariferr.SarifError>
+    let short_f = message_text(v, "shortDescription", ptr)
+    let short = match short_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let full_f = message_text(v, "fullDescription", ptr)
+    let full = match full_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let level_f = read_default_level(v, ptr)
+    let level = match level_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let props_f = read_properties(v, ptr)
+    let props = match props_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    Ok(SarifRule { id: str_member(v, "id"), name: str_member(v, "name"),
+                   short_description: short, full_description: full,
+                   default_level: level, help_uri: str_member(v, "helpUri"),
+                   properties: props })
+
+// One component of a tool: its name, its versions, and its rules.
+//
+// The value being an object is its callers' to check and each has: the
+// driver comes from `object_member` and an extension entry is checked
+// before it is read, so this does not check it again.
+fn read_component(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifDriver, sariferr.SarifError>
+    let items_f = list_member(v, "rules", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var rules: [sarifrun.SarifRule] = []
+    var i = 0
+    while i < list.len(items)
+        let item = items[i]
+        if not is_object(item)
+            return Err(SarifBadShape("${ptr}/rules/${i}", "a JSON object", json.type_of(item)))
+        let one = read_rule(item, "${ptr}/rules/${i}")
+        let rule = match one
+            Err(e) =>
+                return Err(e)
+            Ok(x)  => x
+        rules = list.push(rules, rule)
+        i = i + 1
+    Ok(SarifDriver { name: str_member(v, "name"), version: str_member(v, "version"),
+                     semantic_version: str_member(v, "semanticVersion"),
+                     information_uri: str_member(v, "informationUri"), rules: rules })
+
+// A component with nothing in it, for a document that names no tool.
+fn empty_driver() -> sarifrun.SarifDriver
+    SarifDriver { name: "", version: "", semantic_version: "", information_uri: "",
+                  rules: [] }
+
+// The tool that produced a run, out of the run: the format puts it one
+// level down, under a `tool` member.
+//
+// The run being an object is `read_run_at`'s to check and it has, so
+// this does not check it again: a second check would be a line no
+// document could reach, and `object_member` answers a member of a value
+// that has none anyway.
+fn read_tool(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifTool, sariferr.SarifError>
+    let found = object_member(v, "tool", ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(tv) = obj else
+        return Ok(SarifTool { driver: empty_driver(), extensions: [] })
+    read_tool_members(tv, ptr + "/tool")
+
+// A tool object: one driver and any extensions.
+//
+// The object being an object is `read_tool`'s to check and it has, the
+// same way and for the same reason.
+fn read_tool_members(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifTool, sariferr.SarifError>
+    let df = object_member(v, "driver", ptr)
+    let dobj = match df
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    var driver = SarifDriver { name: "", version: "", semantic_version: "",
+                               information_uri: "", rules: [] }
+    let Some(dv) = dobj else return read_extensions(v, ptr, driver)
+    let one = read_component(dv, ptr + "/driver")
+    let read = match one
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    driver = read
+    read_extensions(v, ptr, driver)
+
+// A tool's extensions, and then the tool.
+fn read_extensions(v: JsonValueH, ptr: Str,
+                   driver: sarifrun.SarifDriver) -> Result<sarifrun.SarifTool, sariferr.SarifError>
+    let items_f = list_member(v, "extensions", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var exts: [sarifrun.SarifDriver] = []
+    var i = 0
+    while i < list.len(items)
+        let item = items[i]
+        if not is_object(item)
+            return Err(SarifBadShape("${ptr}/extensions/${i}", "a JSON object",
+                                     json.type_of(item)))
+        let one = read_component(item, "${ptr}/extensions/${i}")
+        let ext = match one
+            Err(e) =>
+                return Err(e)
+            Ok(x)  => x
+        exts = list.push(exts, ext)
+        i = i + 1
+    Ok(SarifTool { driver: driver, extensions: exts })
+
+// An invocation out of its members.
+fn invocation_of(v: JsonValueH, args: [Str], working: Str) -> sarifrun.SarifInvocation
+    SarifInvocation { command_line: str_member(v, "commandLine"), arguments: args,
+                      successful: json.get_bool(v, "executionSuccessful") ?? true,
+                      exit_code: num_member(v, "exitCode", -1),
+                      start_time_utc: str_member(v, "startTimeUtc"),
+                      end_time_utc: str_member(v, "endTimeUtc"),
+                      working_directory: working }
+
+// One invocation.
+fn read_invocation(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifInvocation, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let args_f = read_string_list(v, "arguments", ptr)
+    let args = match args_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let wf = object_member(v, "workingDirectory", ptr)
+    let wd = match wf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    var working = ""
+    let Some(w) = wd else return Ok(invocation_of(v, args, working))
+    working = str_member(w, "uri")
+    Ok(invocation_of(v, args, working))
+
+// The run's URI bases, keyed by the name an artifact's `uriBaseId`
+// refers to.
+fn read_bases(v: JsonValueH, ptr: Str) -> Result<[sarifrun.SarifUriBase], sariferr.SarifError>
+    let found = member(v, "originalUriBaseIds")
+    let Some(bv) = found else return Ok([])
+    if not is_object(bv)
+        return Err(SarifBadShape(ptr + "/originalUriBaseIds", "a JSON object",
+                                 json.type_of(bv)))
+    var out: [sarifrun.SarifUriBase] = []
+    for k in json.keys(bv)
+        let got = json.get(bv, k)
+        let Some(item) = got else continue
+        if not is_object(item)
+            return Err(SarifBadShape("${ptr}/originalUriBaseIds/${k}", "a JSON object",
+                                     json.type_of(item)))
+        let desc_f = message_text(item, "description", "${ptr}/originalUriBaseIds/${k}")
+        let desc = match desc_f
+            Err(e) =>
+                return Err(e)
+            Ok(x)  => x
+        out = list.push(out, SarifUriBase { id: k, uri: str_member(item, "uri"),
+                                            description: desc })
+    Ok(out)
+
+// The logical location a location names, by index into the run's own
+// table.
+//
+// The inline spelling — a name and a kind written where the location is
+// — is not a reference and is not read as one: a location here carries
+// the index, and the inline members a document wrote instead are
+// reported by `unknown_members`.
+fn read_logical_ref(items: [JsonValueH], ptr: Str,
+                    ctx: ReadCtx) -> Result<sarifref.SarifLogicalRef, sariferr.SarifError>
+    if list.len(items) == 0
+        return Ok(SarifLogicalRef { index: -1 })
+    let first = items[0]
+    if not is_object(first)
+        return Err(SarifBadShape(ptr + "/0", "a JSON object", json.type_of(first)))
+    let ix = json.get_int(first, "index")
+    let Some(n) = ix else return Ok(SarifLogicalRef { index: -1 })
+    if n < 0
+        return Ok(SarifLogicalRef { index: -1 })
+    if n >= ctx.logical_count
+        return Err(SarifIndexOutOfRange(ptr + "/0/index", n, ctx.logical_count))
+    Ok(SarifLogicalRef { index: n })
+
+// One location: a physical one, a logical one, or both, and a sentence
+// about it.
+fn read_location(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                 var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifLocation, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let pf = object_member(v, "physicalLocation", ptr)
+    let obj = match pf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(pv) = obj else
+        return read_location_rest(v, ptr, ctx, empty_physical(), var arts)
+    let placed = read_physical(pv, ptr + "/physicalLocation", var arts)
+    let phys = match placed
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    read_location_rest(v, ptr, ctx, phys, var arts)
+
+// A physical location: the artifact, and where in it.
+fn read_physical(v: JsonValueH, ptr: Str,
+                 var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifPhysical, sariferr.SarifError>
+    let found = object_member(v, "artifactLocation", ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(av) = obj else return read_physical_rest(v, ptr, sarifref.no_artifact())
+    let placed = read_artifact_ref(av, ptr + "/artifactLocation", var arts)
+    let which = match placed
+        Err(e) =>
+            return Err(e)
+        Ok(a)  => a
+    read_physical_rest(v, ptr, which)
+
+// The regions of a physical location, once its artifact is known.
+fn read_physical_rest(v: JsonValueH, ptr: Str,
+                      artifact: sarifref.SarifArtifactRef) -> Result<sarifresult.SarifPhysical, sariferr.SarifError>
+    let found = region_member(v, "region", ptr)
+    let region = match found
+        Err(e) =>
+            return Err(e)
+        Ok(r)  => r
+    let cfound = region_member(v, "contextRegion", ptr)
+    let context = match cfound
+        Err(e) =>
+            return Err(e)
+        Ok(c)  => c
+    Ok(SarifPhysical { artifact: artifact, region: region, context_region: context })
+
+// The logical location and the sentence, once the physical part is
+// known.
+fn read_location_rest(v: JsonValueH, ptr: Str, ctx: ReadCtx, physical: sarifresult.SarifPhysical,
+                      var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifLocation, sariferr.SarifError>
+    let items_f = list_member(v, "logicalLocations", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let which = read_logical_ref(items, ptr + "/logicalLocations", ctx)
+    let logical = match which
+        Err(e) =>
+            return Err(e)
+        Ok(l)  => l
+    let mf = object_member(v, "message", ptr)
+    let msg = match mf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let text = match msg
+        Some(mv) => str_member(mv, "text")
+        None     => ""
+    Ok(SarifLocation { physical: physical, logical: logical, message: text })
+
+// A list of locations from an array.
+fn read_locations(items: [JsonValueH], ptr: Str, ctx: ReadCtx,
+                  var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifLocation], sariferr.SarifError>
+    var out: [sarifresult.SarifLocation] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_location(items[i], "${ptr}/${i}", ctx, var arts)
+        let loc = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, loc)
+        i = i + 1
+    Ok(out)
+
+// A list of locations out of a member.
+fn read_locations_member(v: JsonValueH, name: Str, ptr: Str, ctx: ReadCtx,
+                         var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifLocation], sariferr.SarifError>
+    let items_f = list_member(v, name, ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    read_locations(items, ptr + "/" + name, ctx, var arts)
+
+// One step of a code flow.
+fn read_flow_step(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                  var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifFlowStep, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let lf = object_member(v, "location", ptr)
+    let obj = match lf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(lv) = obj else return Ok(flow_step_of(v, empty_location()))
+    let placed = read_location(lv, ptr + "/location", ctx, var arts)
+    let loc = match placed
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(flow_step_of(v, loc))
+
+// One step of a code flow, once its location is known.
+fn flow_step_of(v: JsonValueH, location: sarifresult.SarifLocation) -> sarifresult.SarifFlowStep
+    SarifFlowStep { location: location,
+                    execution_order: num_member(v, "executionOrder", -1),
+                    nesting_level: num_member(v, "nestingLevel", -1),
+                    importance: str_member(v, "importance") }
+
+// The steps of a thread flow.
+fn read_flow_steps(items: [JsonValueH], ptr: Str, ctx: ReadCtx,
+                   var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifFlowStep], sariferr.SarifError>
+    var out: [sarifresult.SarifFlowStep] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_flow_step(items[i], "${ptr}/${i}", ctx, var arts)
+        let step = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, step)
+        i = i + 1
+    Ok(out)
+
+// One sequential path through the program.
+fn read_thread_flow(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                    var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifThreadFlow, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let msg_f = message_text(v, "message", ptr)
+    let msg = match msg_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let items_f = list_member(v, "locations", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let steps_f = read_flow_steps(items, ptr + "/locations", ctx, var arts)
+    let steps = match steps_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(SarifThreadFlow { id: str_member(v, "id"), message: msg, locations: steps })
+
+// One code flow.
+fn read_code_flow(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                  var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifCodeFlow, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let msg_f = message_text(v, "message", ptr)
+    let msg = match msg_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let items_f = list_member(v, "threadFlows", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifresult.SarifThreadFlow] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_thread_flow(items[i], "${ptr}/threadFlows/${i}", ctx, var arts)
+        let flow = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, flow)
+        i = i + 1
+    Ok(SarifCodeFlow { message: msg, thread_flows: out })
+
+// The code flows out of a member.
+fn read_flows_member(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                     var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifCodeFlow], sariferr.SarifError>
+    let items_f = list_member(v, "codeFlows", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifresult.SarifCodeFlow] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_code_flow(items[i], "${ptr}/codeFlows/${i}", ctx, var arts)
+        let flow = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, flow)
+        i = i + 1
+    Ok(out)
+
+// The text of a replacement's inserted content.
+fn content_text(v: JsonValueH, ptr: Str) -> Result<Str, sariferr.SarifError>
+    let found = object_member(v, "insertedContent", ptr)
+    let obj = match found
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(cv) = obj else return Ok("")
+    Ok(str_member(cv, "text"))
+
+// One replacement inside one artifact.  A replacement that names no
+// region reads back as the whole artifact, which is exactly the fault
+// `problems` reports.
+//
+// It names no artifact, so it needs neither the context nor the table.
+fn read_replacement(v: JsonValueH,
+                    ptr: Str) -> Result<sarifresult.SarifReplacement, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let reg_f = region_member(v, "deletedRegion", ptr)
+    let region = match reg_f
+        Err(e) =>
+            return Err(e)
+        Ok(r)  => r
+    let text_f = content_text(v, ptr)
+    let text = match text_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    Ok(SarifReplacement { deleted_region: region, inserted_text: text })
+
+// The replacements of one change.
+fn read_replacements(items: [JsonValueH],
+                     ptr: Str) -> Result<[sarifresult.SarifReplacement], sariferr.SarifError>
+    var out: [sarifresult.SarifReplacement] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_replacement(items[i], "${ptr}/${i}")
+        let rep = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, rep)
+        i = i + 1
+    Ok(out)
+
+// The changes to one artifact.
+fn read_change(v: JsonValueH, ptr: Str,
+               var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifChange, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let af = object_member(v, "artifactLocation", ptr)
+    let obj = match af
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(av) = obj else return read_change_rest(v, ptr, sarifref.no_artifact())
+    let placed = read_artifact_ref(av, ptr + "/artifactLocation", var arts)
+    let which = match placed
+        Err(e) =>
+            return Err(e)
+        Ok(a)  => a
+    read_change_rest(v, ptr, which)
+
+// The replacements of a change, once its artifact is known.
+fn read_change_rest(v: JsonValueH, ptr: Str,
+                    artifact: sarifref.SarifArtifactRef) -> Result<sarifresult.SarifChange, sariferr.SarifError>
+    let items_f = list_member(v, "replacements", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let reps_f = read_replacements(items, ptr + "/replacements")
+    let reps = match reps_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(SarifChange { artifact: artifact, replacements: reps })
+
+// One fix.
+fn read_fix(v: JsonValueH, ptr: Str,
+            var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifFix, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let desc_f = message_text(v, "description", ptr)
+    let desc = match desc_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let items_f = list_member(v, "artifactChanges", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifresult.SarifChange] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_change(items[i], "${ptr}/artifactChanges/${i}", var arts)
+        let change = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, change)
+        i = i + 1
+    Ok(SarifFix { description: desc, changes: out })
+
+// The fixes out of a member.
+fn read_fixes_member(v: JsonValueH, ptr: Str,
+                     var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifFix], sariferr.SarifError>
+    let items_f = list_member(v, "fixes", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifresult.SarifFix] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_fix(items[i], "${ptr}/fixes/${i}", var arts)
+        let fix = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, fix)
+        i = i + 1
+    Ok(out)
+
+// A suppression's kind.  Absent is `external`, the format's default.
+fn read_suppression_kind(v: JsonValueH,
+                         ptr: Str) -> Result<sarifref.SarifSuppressionKind, sariferr.SarifError>
+    let found = member(v, "kind")
+    let Some(kv) = found else return Ok(SarifSuppressionExternal)
+    let Some(name) = json.to_str(kv) else
+        return Err(SarifBadShape(ptr + "/kind", "a string", json.type_of(kv)))
+    if name == "external"
+        return Ok(SarifSuppressionExternal)
+    if name == "inSource"
+        return Ok(SarifSuppressionInSource)
+    Err(SarifUnknownEnum(ptr + "/kind", "kind", name))
+
+// A suppression's status.  Absent is `accepted`, the format's default.
+fn read_suppression_status(v: JsonValueH,
+                           ptr: Str) -> Result<sarifref.SarifSuppressionStatus, sariferr.SarifError>
+    let found = member(v, "status")
+    let Some(sv) = found else return Ok(SarifSuppressionAccepted)
+    let Some(name) = json.to_str(sv) else
+        return Err(SarifBadShape(ptr + "/status", "a string", json.type_of(sv)))
+    if name == "accepted"
+        return Ok(SarifSuppressionAccepted)
+    if name == "underReview"
+        return Ok(SarifSuppressionUnderReview)
+    if name == "rejected"
+        return Ok(SarifSuppressionRejected)
+    Err(SarifUnknownEnum(ptr + "/status", "status", name))
+
+// Why a result is not being reported.
+fn read_suppression(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                    var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifSuppression, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let kind_f = read_suppression_kind(v, ptr)
+    let kind = match kind_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let status_f = read_suppression_status(v, ptr)
+    let status = match status_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let lf = object_member(v, "location", ptr)
+    let obj = match lf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(lv) = obj else
+        return Ok(suppression_of(v, kind, status, empty_location()))
+    let placed = read_location(lv, ptr + "/location", ctx, var arts)
+    let loc = match placed
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(suppression_of(v, kind, status, loc))
+
+// A suppression, once its location is known.
+fn suppression_of(v: JsonValueH, kind: sarifref.SarifSuppressionKind,
+                  status: sarifref.SarifSuppressionStatus,
+                  location: sarifresult.SarifLocation) -> sarifresult.SarifSuppression
+    SarifSuppression { kind: kind, status: status,
+                       justification: str_member(v, "justification"),
+                       location: location }
+
+// The suppressions out of a member.
+fn read_suppressions_member(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+                            var arts: [sarifrun.SarifArtifact]) -> Result<[sarifresult.SarifSuppression], sariferr.SarifError>
+    let items_f = list_member(v, "suppressions", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifresult.SarifSuppression] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_suppression(items[i], "${ptr}/suppressions/${i}", ctx, var arts)
+        let sup = match one
+            Err(e) =>
+                return Err(e)
+            Ok(p)  => p
+        list.push(out, sup)
+        i = i + 1
+    Ok(out)
+
+// The rule an identifier names, anywhere in a tool, or the absent ref.
+fn rule_by_name(tool: sarifrun.SarifTool, id: Str) -> sarifref.SarifRuleRef
+    if id == ""
+        return sarifref.no_rule()
+    var i = 0
+    while i < list.len(tool.driver.rules)
+        if tool.driver.rules[i].id == id
+            return SarifRuleRef { component: 0, index: i }
+        i = i + 1
+    var e = 0
+    while e < list.len(tool.extensions)
+        let ext = tool.extensions[e]
+        var j = 0
+        while j < list.len(ext.rules)
+            if ext.rules[j].id == id
+                return SarifRuleRef { component: e + 1, index: j }
+            j = j + 1
+        e = e + 1
+    sarifref.no_rule()
+
+// The number of rules one component of a tool has.
+fn component_rule_count(tool: sarifrun.SarifTool, component: Int) -> Int
+    if component == 0
+        return list.len(tool.driver.rules)
+    list.len(tool.extensions[component - 1].rules)
+
+// The component a result's rule index is relative to: 0 for the driver,
+// and 1-based into the extensions, which is what the format's
+// `rule.toolComponent.index` means one below.
+fn result_component(v: JsonValueH, ptr: Str, exts: Int) -> Result<Int, sariferr.SarifError>
+    let rf = object_member(v, "rule", ptr)
+    let obj = match rf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(rv) = obj else return Ok(0)
+    let tf = object_member(rv, "toolComponent", ptr + "/rule")
+    let tobj = match tf
+        Err(e) =>
+            return Err(e)
+        Ok(o)  => o
+    let Some(tv) = tobj else return Ok(0)
+    let ix = json.get_int(tv, "index")
+    let Some(k) = ix else return Ok(0)
+    if k < 0 or k >= exts
+        return Err(SarifIndexOutOfRange(ptr + "/rule/toolComponent/index", k, exts))
+    Ok(k + 1)
+
+// A result's rule index: the format's own `ruleIndex`, or the `index`
+// of the `rule` object when that is where the index is written.
+fn rule_index_of(v: JsonValueH) -> Int
+    let top = json.get_int(v, "ruleIndex")
+    let Some(n) = top else return inner_rule_index(v)
+    n
+
+// The `index` of a result's `rule` object, or -1.
+//
+// A `rule` that is not an object is `result_component`'s refusal to
+// make, and it runs first — so the member here is always an object and
+// `num_member` answers an object without one.
+fn inner_rule_index(v: JsonValueH) -> Int
+    let rf = member(v, "rule")
+    let Some(rv) = rf else return -1
+    num_member(rv, "index", -1)
+
+// The rule a result names, checked against the component's own table.
+//
+// An index outside the table is a REFUSAL — that is the class of fault
+// a schema validator passes and a reader cannot — while an identifier
+// that disagrees with the rule at the index is a problem for
+// `result_problems`, not a refusal.
+fn read_rule_ref(v: JsonValueH, ptr: Str, tool: sarifrun.SarifTool,
+                 rule_id: Str) -> Result<sarifref.SarifRuleRef, sariferr.SarifError>
+    let comp_f = result_component(v, ptr, list.len(tool.extensions))
+    let comp = match comp_f
+        Err(e) =>
+            return Err(e)
+        Ok(c)  => c
+    let n = rule_index_of(v)
+    if n < 0
+        return Ok(rule_by_name(tool, rule_id))
+    let size = component_rule_count(tool, comp)
+    if n >= size
+        return Err(SarifIndexOutOfRange(ptr + "/ruleIndex", n, size))
+    Ok(SarifRuleRef { component: comp, index: n })
+
+// One result.
+fn read_result(v: JsonValueH, ptr: Str, ctx: ReadCtx,
+               var arts: [sarifrun.SarifArtifact]) -> Result<sarifresult.SarifResult, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let rule_id = str_member(v, "ruleId")
+    let rf = read_rule_ref(v, ptr, ctx.tool, rule_id)
+    let rule = match rf
+        Err(e) =>
+            return Err(e)
+        Ok(r)  => r
+    let kf = read_kind(v, ptr)
+    let kind = match kf
+        Err(e) =>
+            return Err(e)
+        Ok(k)  => k
+    let lf = read_level(v, ptr, kind)
+    let level = match lf
+        Err(e) =>
+            return Err(e)
+        Ok(l)  => l
+    let mf = message_pair(v, ptr)
+    let msg = match mf
+        Err(e) =>
+            return Err(e)
+        Ok(m)  => m
+    let locs_f = read_locations_member(v, "locations", ptr, ctx, var arts)
+    let locs = match locs_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    let rel_f = read_locations_member(v, "relatedLocations", ptr, ctx, var arts)
+    let rel = match rel_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    let flows_f = read_flows_member(v, ptr, ctx, var arts)
+    let flows = match flows_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    let fixes_f = read_fixes_member(v, ptr, var arts)
+    let fixes = match fixes_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    let sups_f = read_suppressions_member(v, ptr, ctx, var arts)
+    let sups = match sups_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    let bf = read_baseline(v, ptr)
+    let baseline = match bf
+        Err(e) =>
+            return Err(e)
+        Ok(b)  => b
+    let fps_f = read_fingerprints(v, ptr)
+    let fps = match fps_f
+        Err(e) =>
+            return Err(e)
+        Ok(f)  => f
+    let props_f = read_properties(v, ptr)
+    let props = match props_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(SarifResult { rule: rule, rule_id: rule_id, kind: kind, level: level,
+                     message: msg.text, message_markdown: msg.markdown,
+                     locations: locs, related_locations: rel, code_flows: flows,
+                     fixes: fixes, suppressions: sups, baseline: baseline,
+                     fingerprints: fps, properties: props })
+
+// One run out of a JSON value.
+//
+// The artifact table is a `var` here because a result may name its
+// artifact by URI where the run declared none, and the interning has to
+// reach back into the run the caller is building — see `intern`.
+fn read_run_at(v: JsonValueH, ptr: Str) -> Result<sarifrun.SarifRun, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape(ptr, "a JSON object", json.type_of(v)))
+    let tool_f = read_tool(v, ptr)
+    let tool = match tool_f
+        Err(e) =>
+            return Err(e)
+        Ok(t)  => t
+    let decl_f = read_artifacts(v, ptr)
+    let declared = match decl_f
+        Err(e) =>
+            return Err(e)
+        Ok(a)  => a
+    var arts = declared[:]
+    let logs_f = read_logicals(v, ptr)
+    let logs = match logs_f
+        Err(e) =>
+            return Err(e)
+        Ok(l)  => l
+    let ctx = ReadCtx { tool: tool, logical_count: list.len(logs) }
+    let items_f = list_member(v, "results", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var results: [sarifresult.SarifResult] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_result(items[i], "${ptr}/results/${i}", ctx, var arts)
+        let res = match one
+            Err(e) =>
+                return Err(e)
+            Ok(r)  => r
+        list.push(results, res)
+        i = i + 1
+    let invs_f = read_invocations(v, ptr)
+    let invs = match invs_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    let bases_f = read_bases(v, ptr)
+    let bases = match bases_f
+        Err(e) =>
+            return Err(e)
+        Ok(b)  => b
+    let props_f = read_properties(v, ptr)
+    let props = match props_f
+        Err(e) =>
+            return Err(e)
+        Ok(p)  => p
+    Ok(SarifRun { tool: tool, artifacts: arts, logical_locations: logs,
+                  results: results, invocations: invs, uri_base_ids: bases,
+                  properties: props })
+
+// A run's artifact table.
+fn read_artifacts(v: JsonValueH, ptr: Str) -> Result<[sarifrun.SarifArtifact], sariferr.SarifError>
+    let items_f = list_member(v, "artifacts", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifrun.SarifArtifact] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_artifact(items[i], "${ptr}/artifacts/${i}")
+        let art = match one
+            Err(e) =>
+                return Err(e)
+            Ok(a)  => a
+        out = list.push(out, art)
+        i = i + 1
+    Ok(out)
+
+// A run's invocations.
+fn read_invocations(v: JsonValueH,
+                    ptr: Str) -> Result<[sarifrun.SarifInvocation], sariferr.SarifError>
+    let items_f = list_member(v, "invocations", ptr)
+    let items = match items_f
+        Err(e) =>
+            return Err(e)
+        Ok(x)  => x
+    var out: [sarifrun.SarifInvocation] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_invocation(items[i], "${ptr}/invocations/${i}")
+        let inv = match one
+            Err(e) =>
+                return Err(e)
+            Ok(x)  => x
+        out = list.push(out, inv)
+        i = i + 1
+    Ok(out)
+
+// A whole log out of a JSON value.
+fn read_log_at(v: JsonValueH) -> Result<sarifrun.SarifLog, sariferr.SarifError>
+    if not is_object(v)
+        return Err(SarifBadShape("", "a JSON object", json.type_of(v)))
+    let vf = member(v, "version")
+    let Some(ver) = vf else return Err(SarifBadShape("/version", "a string", "no member"))
+    let Some(name) = json.to_str(ver) else
+        return Err(SarifBadShape("/version", "a string", json.type_of(ver)))
+    if name != sarifrun.sarif_version()
+        return Err(SarifWrongVersion(name))
+    let schema = str_member(v, "\$schema")
+    let rf = member(v, "runs")
+    let Some(rv) = rf else return Err(SarifBadShape("/runs", "an array", "no member"))
+    let Some(items) = json.to_list(rv) else
+        return Err(SarifBadShape("/runs", "an array", json.type_of(rv)))
+    var runs: [sarifrun.SarifRun] = []
+    var i = 0
+    while i < list.len(items)
+        let one = read_run_at(items[i], "/runs/${i}")
+        let run = match one
+            Err(e) =>
+                return Err(e)
+            Ok(r)  => r
+        runs = list.push(runs, run)
+        i = i + 1
+    Ok(SarifLog { version: name, schema: schema, runs: runs })
+
+// ── Private helpers for the checks ───────────────────────────────────
+
+// The rule-identifier mismatch, when there is one.
+fn mismatch_problem(r: sarifrun.SarifRun, res: sarifresult.SarifResult, index: Int,
+                    out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    if sarifref.rule_ref_absent(res.rule)
+        return out[:]
+    let found = sarifrun.rule_of(r, res.rule)
+    let Some(rule) = found else return out[:]
+    if res.rule_id == "" or res.rule_id == rule.id
+        return out[:]
+    var result = out[:]
+    list.push(result, SarifRuleIdMismatch(index, res.rule_id, rule.id))
+    result
+
+// The level a kind does not admit, when there is one.
+fn level_problem(res: sarifresult.SarifResult, index: Int,
+                 out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    if sarifref.level_ok(res.kind, res.level)
+        return out[:]
+    var result = out[:]
+    list.push(result, SarifLevelForKind(index, sarifref.kind_name(res.kind),
+                                        sarifref.level_name(res.level)))
+    result
+
+// Whether a region's character coordinates and its text coordinates
+// cannot both be right.
+//
+// Detectable exactly on line 1, where a character offset and a 1-based
+// column are the same measurement one apart: an emitter that wrote a
+// byte offset into `charOffset` is caught here, and a region that
+// carries only one of the two systems is never reported.
+fn region_disagrees(r: sarifresult.SarifRegion) -> Bool
+    if not sarifresult.region_has_text(r) or not sarifresult.region_has_chars(r)
+        return false
+    if r.start_line != 1
+        return false
+    r.start_column != r.char_offset + 1
+
+// The locations whose coordinates disagree.
+fn location_problems(res: sarifresult.SarifResult, index: Int,
+                     out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(res.locations)
+        if region_disagrees(res.locations[i].physical.region)
+            list.push(cur, SarifRegionDisagrees(index, i))
+        if region_disagrees(res.locations[i].physical.context_region)
+            list.push(cur, SarifRegionDisagrees(index, i))
+    cur
+
+// The fixes whose replacements would replace a whole artifact.
+fn fix_problems(res: sarifresult.SarifResult, index: Int,
+                out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(res.fixes)
+        let fix = res.fixes[i]
+        for j in 0..list.len(fix.changes)
+            let replacements = fix.changes[j].replacements
+            for k in 0..list.len(replacements)
+                if sarifresult.region_is_whole(replacements[k].deleted_region)
+                    list.push(cur, SarifUnboundedFix(index, i))
+    cur
+
+// One URI as a path with its `.` and `..` segments resolved.
+//
+// Not a URI resolver and not claimed to be one: it is the comparison
+// that makes `./a.nv` and `a.nv` the same file, and a `..` that would
+// climb above the root is kept rather than dropped.
+fn normal_path(uri: Str) -> Str
+    let parts = str.split(uri, "/")
+    var kept: [Str] = []
+    for p in parts
+        if p == "" or p == "."
+            continue
+        if p == ".." and list.len(kept) > 0 and kept[list.len(kept) - 1] != ".."
+            kept = drop_last(kept)
+            continue
+        kept = list.push(kept, p)
+    str.join(kept, "/")
+
+// A list with its last element dropped.  A list with nothing in it
+// answers itself.
+fn drop_last(xs: [Str]) -> [Str]
+    var out: [Str] = []
+    var i = 0
+    while i + 1 < list.len(xs)
+        out = list.push(out, xs[i])
+        i = i + 1
+    out
+
+// Whether two URIs under one base are two spellings of one path.
+fn same_path(a: Str, b: Str) -> Bool
+    a == b or normal_path(a) == normal_path(b)
+
+// The artifacts whose URIs are two spellings of one path.
+fn duplicate_problems(r: sarifrun.SarifRun, out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(r.artifacts)
+        for j in i + 1..list.len(r.artifacts)
+            let a = r.artifacts[i]
+            let b = r.artifacts[j]
+            if a.uri_base_id == b.uri_base_id and same_path(a.uri, b.uri)
+                list.push(cur, SarifDuplicateArtifact(i, j, b.uri))
+    cur
+
+// Whether two rules of one table say different things.
+fn rules_differ(a: sarifrun.SarifRule, b: sarifrun.SarifRule) -> Bool
+    a.name != b.name or a.short_description != b.short_description
+        or a.full_description != b.full_description
+        or a.default_level != b.default_level or a.help_uri != b.help_uri
+
+// The rules one table declares twice with different descriptions.
+fn table_rule_duplicates(rules: [sarifrun.SarifRule],
+                         out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(rules)
+        for j in i + 1..list.len(rules)
+            if rules[i].id != "" and rules[i].id == rules[j].id
+                and rules_differ(rules[i], rules[j])
+                list.push(cur, SarifDuplicateRule(i, j, rules[i].id))
+    cur
+
+// The duplicate rules, in the driver and then in every extension.
+fn rule_duplicate_problems(r: sarifrun.SarifRun,
+                           out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = table_rule_duplicates(r.tool.driver.rules, out)
+    for ext in r.tool.extensions
+        cur = table_rule_duplicates(ext.rules, cur)
+    cur
+
+// Whether a result points at one artifact.
+fn result_uses_artifact(res: sarifresult.SarifResult, index: Int) -> Bool
+    for l in res.locations
+        if l.physical.artifact.index == index
+            return true
+    for l in res.related_locations
+        if l.physical.artifact.index == index
+            return true
+    for f in res.code_flows
+        for t in f.thread_flows
+            for s in t.locations
+                if s.location.physical.artifact.index == index
+                    return true
+    for f in res.fixes
+        for c in f.changes
+            if c.artifact.index == index
+                return true
+    for s in res.suppressions
+        if s.location.physical.artifact.index == index
+            return true
+    false
+
+// Whether any result of a run points at one artifact.
+fn artifact_is_used(r: sarifrun.SarifRun, index: Int) -> Bool
+    for res in r.results
+        if result_uses_artifact(res, index)
+            return true
+    false
+
+// The artifacts nothing points at.
+fn orphan_problems(r: sarifrun.SarifRun, out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(r.artifacts)
+        if not artifact_is_used(r, i)
+            list.push(cur, SarifOrphanArtifact(i, r.artifacts[i].uri))
+    cur
+
+// The timestamps that are not SARIF's RFC 3339 profile.
+fn timestamp_problems(r: sarifrun.SarifRun, out: [sariferr.SarifProblem]) -> [sariferr.SarifProblem]
+    var cur = out[:]
+    for i in 0..list.len(r.invocations)
+        let inv = r.invocations[i]
+        if inv.start_time_utc != "" and not sarifrun.timestamp_ok(inv.start_time_utc)
+            list.push(cur, SarifBadTimestamp("/invocations/${i}/startTimeUtc",
+                                                   inv.start_time_utc))
+        if inv.end_time_utc != "" and not sarifrun.timestamp_ok(inv.end_time_utc)
+            list.push(cur, SarifBadTimestamp("/invocations/${i}/endTimeUtc",
+                                                   inv.end_time_utc))
+    cur
+
+// One member of a shape's table.
+fn table_lookup(name: Str, names: [Str], shapes: [Str]) -> ?Str
+    var i = 0
+    while i < list.len(names)
+        if names[i] == name
+            return Some(shapes[i])
+        i = i + 1
+    None
+
+// The shape of a member of an object shape, or `None` when the shape
+// has no member of that name.
+//
+// The encodings: `s`, `i` and `b` are a string, a number and a boolean;
+// `o` is a value this package does not look inside; `+name` is an
+// object of shape `name`; `*shape` is an array of `shape`; and `@shape`
+// is an object with arbitrary keys whose values are `shape`.
+//
+// A member is here when the reader HAS a field for it.  Everything else
+// is what `unknown_members` reports, and the nine objects the README
+// lists as outside this package are simply not in the table.
+fn shape_member(shape: Str, name: Str) -> ?Str
+    if shape == "log"
+        return table_lookup(name, ["version", "\$schema", "runs"],
+                                  ["s", "s", "*+run"])
+    if shape == "run"
+        return table_lookup(name,
+            ["tool", "artifacts", "logicalLocations", "results", "invocations",
+             "originalUriBaseIds", "properties"],
+            ["+tool", "*+artifact", "*+logical", "*+result", "*+invocation",
+             "@+uriBase", "@o"])
+    if shape == "tool"
+        return table_lookup(name, ["driver", "extensions"], ["+driver", "*driver"])
+    if shape == "driver"
+        return table_lookup(name,
+            ["name", "version", "semanticVersion", "informationUri", "rules"],
+            ["s", "s", "s", "s", "*+rule"])
+    if shape == "rule"
+        return table_lookup(name,
+            ["id", "name", "shortDescription", "fullDescription",
+             "defaultConfiguration", "helpUri", "properties"],
+            ["s", "s", "+message", "+message", "+ruleConfig", "s", "@o"])
+    if shape == "ruleConfig"
+        return table_lookup(name, ["level"], ["s"])
+    if shape == "message"
+        return table_lookup(name, ["text", "markdown"], ["s", "s"])
+    if shape == "messageText"
+        return table_lookup(name, ["text"], ["s"])
+    if shape == "artifact"
+        return table_lookup(name, ["location", "mimeType", "length", "roles"],
+                                  ["+artifactLocation", "s", "i", "*s"])
+    if shape == "artifactLocation"
+        return table_lookup(name, ["uri", "uriBaseId", "index"], ["s", "s", "i"])
+    if shape == "logical"
+        return table_lookup(name, ["name", "fullyQualifiedName", "kind", "parentIndex"],
+                                  ["s", "s", "s", "i"])
+    if shape == "invocation"
+        return table_lookup(name,
+            ["commandLine", "arguments", "executionSuccessful", "exitCode",
+             "startTimeUtc", "endTimeUtc", "workingDirectory"],
+            ["s", "*s", "b", "i", "s", "s", "+artifactLocation"])
+    if shape == "uriBase"
+        return table_lookup(name, ["uri", "description"], ["s", "+messageText"])
+    if shape == "result"
+        return table_lookup(name,
+            ["ruleId", "ruleIndex", "rule", "kind", "level", "message", "locations",
+             "relatedLocations", "codeFlows", "fixes", "suppressions", "baselineState",
+             "partialFingerprints", "properties"],
+            ["s", "i", "+ruleRef", "s", "s", "+message", "*+location", "*+location",
+             "*+codeFlow", "*+fix", "*+suppression", "s", "@s", "@o"])
+    if shape == "ruleRef"
+        return table_lookup(name, ["index", "id", "toolComponent"],
+                                  ["i", "s", "+componentRef"])
+    if shape == "componentRef"
+        return table_lookup(name, ["index"], ["i"])
+    if shape == "location"
+        return table_lookup(name, ["physicalLocation", "logicalLocations", "message"],
+                                  ["+physical", "*+logicalRef", "+messageText"])
+    if shape == "logicalRef"
+        return table_lookup(name, ["index"], ["i"])
+    if shape == "physical"
+        return table_lookup(name, ["artifactLocation", "region", "contextRegion"],
+                                  ["+artifactLocation", "+region", "+region"])
+    if shape == "region"
+        return table_lookup(name,
+            ["startLine", "startColumn", "endLine", "endColumn", "charOffset",
+             "charLength", "byteOffset", "byteLength", "snippet"],
+            ["i", "i", "i", "i", "i", "i", "i", "i", "s"])
+    if shape == "codeFlow"
+        return table_lookup(name, ["message", "threadFlows"], ["+messageText", "*+threadFlow"])
+    if shape == "threadFlow"
+        return table_lookup(name, ["id", "message", "locations"],
+                                  ["s", "+messageText", "*+flowStep"])
+    if shape == "flowStep"
+        return table_lookup(name,
+            ["location", "executionOrder", "nestingLevel", "importance"],
+            ["+location", "i", "i", "s"])
+    if shape == "fix"
+        return table_lookup(name, ["description", "artifactChanges"],
+                                  ["+messageText", "*+change"])
+    if shape == "change"
+        return table_lookup(name, ["artifactLocation", "replacements"],
+                                  ["+artifactLocation", "*+replacement"])
+    if shape == "replacement"
+        return table_lookup(name, ["deletedRegion", "insertedContent"],
+                                  ["+region", "+artifactContent"])
+    if shape == "artifactContent"
+        return table_lookup(name, ["text"], ["s"])
+    if shape == "suppression"
+        return table_lookup(name, ["kind", "status", "justification", "location"],
+                                  ["s", "s", "s", "+location"])
+    // cov: skip — every shape the tables above name has an arm, and this
+    // falls through only for a caller that invented one; `walk_unknown`
+    // never passes a shape it read from a table that is not here.
+    None
+
+// Every pointer in a value that a shape's table has no member for.
+fn walk_unknown(v: JsonValueH, shape: Str, ptr: Str, out: [Str]) -> [Str]
+    if shape == "s" or shape == "i" or shape == "b" or shape == "o"
+        return out[:]
+    if shape == "*s" or shape == "*i" or shape == "*b"
+        return out[:]
+    let kind = str.slice(shape, 0, 1)
+    if kind == "*"
+        let Some(items) = json.to_list(v) else return out[:]
+        return walk_unknown_items(items, str.slice(shape, 1, str.len(shape)), ptr, out)
+    if kind == "@"
+        return walk_unknown_map(v, str.slice(shape, 1, str.len(shape)), ptr, out)
+    if kind != "+"
+        return out[:]
+    walk_unknown_object(v, str.slice(shape, 1, str.len(shape)), ptr, out)
+
+// The same walk over the elements of an array.
+fn walk_unknown_items(items: [JsonValueH], shape: Str, ptr: Str, out: [Str]) -> [Str]
+    var cur = out[:]
+    for i in 0..list.len(items)
+        cur = walk_unknown(items[i], shape, "${ptr}/${i}", cur)
+    cur
+
+// The same walk over a value whose keys are data.
+fn walk_unknown_map(v: JsonValueH, shape: Str, ptr: Str, out: [Str]) -> [Str]
+    if not is_object(v)
+        return out[:]
+    var cur = out[:]
+    for k in json.keys(v)
+        cur = walk_unknown_member(v, k, shape, ptr, cur)
+    cur
+
+// The same walk over an object of a shape: a member the table has is
+// walked into, and one it does not is a pointer in the answer.
+fn walk_unknown_object(v: JsonValueH, shape: Str, ptr: Str, out: [Str]) -> [Str]
+    if not is_object(v)
+        return out[:]
+    var cur = out[:]
+    for k in json.keys(v)
+        let sub = shape_member(shape, k)
+        if sub == None
+            list.push(cur, "${ptr}/${escape_key(k)}")
+        else
+            let Some(s) = sub else continue
+            cur = walk_unknown_member(v, k, s, ptr, cur)
+    cur
+
+// One member of an object, walked as the shape the table gives it.
+fn walk_unknown_member(v: JsonValueH, k: Str, shape: Str, ptr: Str, out: [Str]) -> [Str]
+    let got = json.get(v, k)
+    let Some(item) = got else return out[:]
+    walk_unknown(item, shape, "${ptr}/${escape_key(k)}", out)
+
+// ── The depth bound ──────────────────────────────────────────────────
 
 // How deep `read` will follow a document before refusing.
 //
@@ -39,7 +2024,9 @@ use sariferr
 // from a build service and is therefore input from outside.  Code flows
 // nest and a hostile document can nest them as far as it likes.
 pub fn default_depth() -> Int []
-    todo("sarif-nv.sarifjson.default_depth")
+    64
+
+// ── Writing ──────────────────────────────────────────────────────────
 
 // A log as the standard library's JSON value.
 //
@@ -51,18 +2038,37 @@ pub fn default_depth() -> Int []
 // fn main() [io]
 //     println(json.type_of(sarifjson.write(sarifrun.empty_log())))
 // ```
-pub fn write(log: sarifrun.SarifLog) -> JsonValueH []
-    todo("sarif-nv.sarifjson.write")
+pub fn write(sarif_log: sarifrun.SarifLog) -> JsonValueH []
+    var pairs: [Any] = []
+    pairs = with_value(pairs, "version", json.string(sarif_log.version))
+    pairs = with_value(pairs, "\$schema", json.string(sarif_log.schema))
+    var runs: [Any] = list.map(sarif_log.runs, r => write_run(r))
+    pairs = with_list(pairs, "runs", runs)
+    json.object(pairs)
 
 // One run as a JSON value, for a caller assembling a log itself.
 pub fn write_run(r: sarifrun.SarifRun) -> JsonValueH []
-    todo("sarif-nv.sarifjson.write_run")
+    var pairs: [Any] = []
+    pairs = with_value(pairs, "tool", json_tool(r.tool))
+    var arts: [Any] = list.map(r.artifacts, a => json_artifact(a))
+    pairs = with_list(pairs, "artifacts", arts)
+    var logs: [Any] = list.map(r.logical_locations, l => json_logical(l))
+    pairs = with_list(pairs, "logicalLocations", logs)
+    var results: [Any] = list.map(r.results, res => json_result(res))
+    pairs = with_list(pairs, "results", results)
+    var invs: [Any] = list.map(r.invocations, inv => json_invocation(inv))
+    pairs = with_list(pairs, "invocations", invs)
+    if list.len(r.uri_base_ids) > 0
+        var bases: [Any] = list.map(r.uri_base_ids, b => (b.id, json_base(b)))
+        pairs = with_value(pairs, "originalUriBaseIds", json.object(bases))
+    pairs = with_properties(pairs, r.properties)
+    json.object(pairs)
 
 // A log as compact JSON text.
 //
 // What an upload carries.
 pub fn write_text(log: sarifrun.SarifLog) -> Str []
-    todo("sarif-nv.sarifjson.write_text")
+    json.stringify(write(log))
 
 // A log as indented JSON text.
 //
@@ -70,7 +2076,9 @@ pub fn write_text(log: sarifrun.SarifLog) -> Str []
 // call rather than a flag: a tool usually knows which of the two it is
 // producing, and a flag makes every call site say so again.
 pub fn write_pretty(log: sarifrun.SarifLog) -> Str []
-    todo("sarif-nv.sarifjson.write_pretty")
+    json.pretty(write(log))
+
+// ── Reading ──────────────────────────────────────────────────────────
 
 // A log read out of a JSON value.
 //
@@ -80,12 +2088,14 @@ pub fn write_pretty(log: sarifrun.SarifLog) -> Str []
 // and this call does not run them — a reader that validated every log
 // it read would make the common path pay for the rare one.
 pub fn read(v: JsonValueH) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
-    todo("sarif-nv.sarifjson.read")
+    read_with_depth(v, default_depth())
 
 // A log read out of a JSON value, following at most `max_depth` levels.
 pub fn read_with_depth(v: JsonValueH,
                        max_depth: Int) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
-    todo("sarif-nv.sarifjson.read_with_depth")
+    let found = too_deep(v, "", 1, max_depth)
+    let Some(pointer) = found else return read_log_at(v)
+    Err(SarifTooDeep(pointer, max_depth))
 
 // A log read out of JSON text.
 //
@@ -93,11 +2103,15 @@ pub fn read_with_depth(v: JsonValueH,
 // refusal from a document that parses and is not SARIF — a caller
 // showing a person what went wrong needs to know which.
 pub fn read_text(text: Str) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
-    todo("sarif-nv.sarifjson.read_text")
+    let parsed = json.parse(text)
+    let Some(v) = parsed else return Err(SarifNotJson("the parser answered no value"))
+    read(v)
 
 // One run read out of a JSON value.
 pub fn read_run(v: JsonValueH) -> Result<sarifrun.SarifRun, sariferr.SarifError> []
-    todo("sarif-nv.sarifjson.read_run")
+    let found = too_deep(v, "", 1, default_depth())
+    let Some(pointer) = found else return read_run_at(v, "")
+    Err(SarifTooDeep(pointer, default_depth()))
 
 // Write a log to a sink, and be charged exactly what the sink costs.
 //
@@ -113,7 +2127,7 @@ pub fn read_run(v: JsonValueH) -> Result<sarifrun.SarifRun, sariferr.SarifError>
 // because a SARIF log of a large analysis is tens of megabytes and
 // building the whole string first is the allocation this avoids.
 pub fn write_to<W: Write[e]>(w: W, log: sarifrun.SarifLog) -> ?IoError [e]
-    todo("sarif-nv.sarifjson.write_to")
+    w.write_all(bytes.from_str(write_text(log)))
 
 // ── The checks ───────────────────────────────────────────────────────
 
@@ -127,19 +2141,35 @@ pub fn write_to<W: Write[e]>(w: W, log: sarifrun.SarifLog) -> ?IoError [e]
 // is a log with three problems and reporting the first hides the other
 // two — the same reason this project's schema and OpenAPI packages
 // answer every failure rather than the first.
-pub fn problems(log: sarifrun.SarifLog) -> [sariferr.SarifProblem] []
-    todo("sarif-nv.sarifjson.problems")
+pub fn problems(sarif_log: sarifrun.SarifLog) -> [sariferr.SarifProblem] []
+    var out: [sariferr.SarifProblem] = []
+    for r in sarif_log.runs
+        list.append(out, list.map(run_problems(r), p => p))
+    out
 
 // Everything wrong with one run.
 pub fn run_problems(r: sarifrun.SarifRun) -> [sariferr.SarifProblem] []
-    todo("sarif-nv.sarifjson.run_problems")
+    var out: [sariferr.SarifProblem] = []
+    for i in 0..list.len(r.results)
+        list.append(out, list.map(result_problems(r, i), p => p))
+    out = duplicate_problems(r, out)
+    out = rule_duplicate_problems(r, out)
+    out = orphan_problems(r, out)
+    timestamp_problems(r, out)
 
 // Everything wrong with one result of a run.
 //
 // The refs are checked against the run's own tables, which is what
 // catches a result built by hand with another run's refs in it.
 pub fn result_problems(r: sarifrun.SarifRun, index: Int) -> [sariferr.SarifProblem] []
-    todo("sarif-nv.sarifjson.result_problems")
+    if index < 0 or index >= list.len(r.results)
+        return []
+    let res = r.results[index]
+    var out: [sariferr.SarifProblem] = []
+    out = mismatch_problem(r, res, index, out)
+    out = level_problem(res, index, out)
+    out = location_problems(res, index, out)
+    fix_problems(res, index, out)
 
 // The artifacts whose URIs are two spellings of one path.
 //
@@ -148,14 +2178,17 @@ pub fn result_problems(r: sarifrun.SarifRun, index: Int) -> [sariferr.SarifProbl
 // relative to, and SARIF's answer to that is the URI bases a consumer
 // resolves.  A tool that fed `./src/a.nv` and `src/a.nv` gets told.
 pub fn duplicate_artifacts(r: sarifrun.SarifRun) -> [sariferr.SarifProblem] []
-    todo("sarif-nv.sarifjson.duplicate_artifacts")
+    duplicate_problems(r, [])
 
 // Whether a log has any problem `sariferr.problem_is_serious` calls
 // serious.
 //
 // The one-line question a tool's own test suite asks about its output.
 pub fn is_sound(log: sarifrun.SarifLog) -> Bool []
-    todo("sarif-nv.sarifjson.is_sound")
+    for p in problems(log)
+        if sariferr.problem_is_serious(p)
+            return false
+    true
 
 // A round trip: write a log and read it back.
 //
@@ -166,7 +2199,7 @@ pub fn is_sound(log: sarifrun.SarifLog) -> Bool []
 // and may lose members of a log read from elsewhere — see
 // `unknown_members`.
 pub fn round_trip(log: sarifrun.SarifLog) -> Result<sarifrun.SarifLog, sariferr.SarifError> []
-    todo("sarif-nv.sarifjson.round_trip")
+    read(write(log))
 
 // The JSON Pointers of members a read dropped because this package has
 // no field for them.
@@ -179,4 +2212,4 @@ pub fn round_trip(log: sarifrun.SarifLog) -> Result<sarifrun.SarifLog, sariferr.
 //
 // The README names every one of them and why.
 pub fn unknown_members(v: JsonValueH) -> [Str] []
-    todo("sarif-nv.sarifjson.unknown_members")
+    walk_unknown(v, "+log", "", [])

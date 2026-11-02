@@ -1,10 +1,6 @@
 // sarifbuild_tests.nv — the worked example, and the interning that is
 // the whole point of it.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
-// That is the expected result until the bodies land.
-//
 // THE ASSERTION THIS SUITE EXISTS FOR is the first one below: six
 // results over two files produce TWO artifacts. Everything else in this
 // file is a consequence of that or a case that would break it.

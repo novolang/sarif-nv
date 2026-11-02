@@ -1,9 +1,6 @@
 // sarifjson_tests.nv — the two directions, and the line between a
 // refusal and a finding.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: sarif-nv.<module>.<fn>`.
-//
 // THE ASSERTION THIS SUITE EXISTS FOR: `read` REFUSES an index that
 // points outside its table and only REPORTS a `ruleId` that disagrees
 // with the rule at its index. The first is a document nothing can be
@@ -20,6 +17,7 @@ use sarifrun
 use sarifbuild
 use sarifjson
 use sariferr
+use sarifref
 
 fn one_result_log() -> sarifrun.SarifLog
     var b = sarifbuild.builder("novo", "0.8.9")

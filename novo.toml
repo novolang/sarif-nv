@@ -1,15 +1,12 @@
 [package]
 name        = "sarif-nv"
-version     = "0.0.2"
-description = "SARIF 2.1.0 as a typed value: runs, the tool and its rules, results with locations, regions, code flows, fixes and suppressions, written to and read from the standard library's JSON value.  A location names an artifact by INDEX into the run's own table, and the builder is what makes that index the only way to name one — so a run of ten thousand findings over two hundred files carries two hundred URIs.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "SARIF 2.1.0 as a typed value: runs, the tool and its rules, results with locations, regions, code flows, fixes and suppressions, written to and read from the standard library's JSON value.  A location names an artifact by INDEX into the run's own table, and the builder is what makes that index the only way to name one — so a run of ten thousand findings over two hundred files carries two hundred URIs. "
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+# `experimental`: the interface published in 0.0.1 is the one this
+# implements, and a 0.x version still reserves the right to change it.
+stability   = "experimental"
 
 # `core`.  A SARIF log is a value the caller assembles out of
 # diagnostics it already holds, and writing one is a conversion to the
@@ -24,7 +21,7 @@ category    = "tooling"
 tags        = ["sarif", "static-analysis", "diagnostics", "lint", "ci", "code-scanning", "serde-sarif", "sans-io"]
 repository  = "https://github.com/novolang/sarif-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.20.2"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.
@@ -45,8 +42,9 @@ novo        = ">= 0.8.9"
 # keeps it as the string the caller supplied, because SARIF's own rule
 # is that a URI is resolved against `originalUriBaseIds` at READ time
 # by whoever consumes the log — so a package that normalised one would
-# be answering a question it has no information for.  `sarifuri`'s three
-# checks say what is wrong with a URI without rewriting it.
+# be answering a question it has no information for.  `artifact_uri`,
+# `resolve_uri` and `uri_base_missing` answer a caller's questions about
+# one without rewriting it.
 #
 # calendar-nv is not here either, and that is the `core` rule doing its
 # job: `invocation.startTimeUtc` is a timestamp, a `core` package has no

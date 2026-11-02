@@ -1,0 +1,372 @@
+// sarifapi_tests.nv — the second half of the package's own coverage.
+//
+// WHY A SECOND SUITE.  The four suites that were published with the
+// interface are the specification and they do not change; this pair
+// (`sarifapi_tests`, `sarifedge_tests`) exists because the publish gate
+// measures line coverage over `src/` and an implemented release ships
+// with every line run or excused.  Nothing here contradicts them: every
+// assertion is a consequence of a doc comment that was already written.
+//
+// WHAT THIS ONE HOLDS is the calls a suite driven by an example does
+// not reach — the other spellings of every enumeration, the region
+// builders that are not the one the worked example uses, the reads a
+// gate makes over a run, and the builder calls a tool that has more
+// than one rule, more than one run and more than one component needs.
+
+use std.test
+use std.list
+use std.json
+use sarifref
+use sarifresult
+use sarifrun
+use sarifbuild
+
+// A builder holding a run's own tables, for the calls that need one.
+fn builder_of(r: sarifrun.SarifRun) -> sarifbuild.SarifBuilder
+    SarifBuilder { tool: r.tool, artifacts: r.artifacts,
+                   logical_locations: r.logical_locations, results: r.results,
+                   invocations: r.invocations, uri_base_ids: r.uri_base_ids,
+                   properties: r.properties }
+
+// A run with nothing in it at all.
+fn empty_run() -> sarifrun.SarifRun
+    SarifRun { tool: SarifTool { driver: SarifDriver { name: "", version: "",
+                                                       semantic_version: "",
+                                                       information_uri: "",
+                                                       rules: [] },
+                                 extensions: [] },
+               artifacts: [], logical_locations: [], results: [], invocations: [],
+               uri_base_ids: [], properties: [] }
+
+// ── The enumerations, both ways ──────────────────────────────────────
+
+@test
+fn test_every_spelling_of_every_enumeration_survives_both_ways() [io]
+    test.case("levels")
+    test.assert(sarifref.level_name(SarifLevelNone) == "none")
+    test.assert(sarifref.level_name(SarifLevelNote) == "note")
+    test.assert(sarifref.level_name(SarifLevelWarning) == "warning")
+    test.assert(sarifref.level_name(SarifLevelError) == "error")
+    test.assert(sarifref.level_from_name("none") == Some(SarifLevelNone))
+    test.assert(sarifref.level_from_name("note") == Some(SarifLevelNote))
+    test.assert(sarifref.level_from_name("warning") == Some(SarifLevelWarning))
+    test.assert(sarifref.level_from_name("error") == Some(SarifLevelError))
+
+    test.case("and a spelling the format does not define is not a default")
+    test.assert(sarifref.level_from_name("fatal") == None)
+
+    test.case("kinds")
+    test.assert(sarifref.kind_name(SarifKindFail) == "fail")
+    test.assert(sarifref.kind_name(SarifKindPass) == "pass")
+    test.assert(sarifref.kind_name(SarifKindOpen) == "open")
+    test.assert(sarifref.kind_name(SarifKindReview) == "review")
+    test.assert(sarifref.kind_name(SarifKindNotApplicable) == "notApplicable")
+    test.assert(sarifref.kind_name(SarifKindInformational) == "informational")
+    test.assert(sarifref.kind_from_name("fail") == Some(SarifKindFail))
+    test.assert(sarifref.kind_from_name("pass") == Some(SarifKindPass))
+    test.assert(sarifref.kind_from_name("open") == Some(SarifKindOpen))
+    test.assert(sarifref.kind_from_name("review") == Some(SarifKindReview))
+    test.assert(sarifref.kind_from_name("notApplicable") == Some(SarifKindNotApplicable))
+    test.assert(sarifref.kind_from_name("informational") == Some(SarifKindInformational))
+    test.assert(sarifref.kind_from_name("broken") == None)
+
+    test.case("baseline states")
+    test.assert(sarifref.baseline_name(SarifBaselineNew) == "new")
+    test.assert(sarifref.baseline_name(SarifBaselineUnchanged) == "unchanged")
+    test.assert(sarifref.baseline_name(SarifBaselineUpdated) == "updated")
+    test.assert(sarifref.baseline_name(SarifBaselineAbsent) == "absent")
+    test.assert(sarifref.baseline_from_name("new") == Some(SarifBaselineNew))
+    test.assert(sarifref.baseline_from_name("unchanged") == Some(SarifBaselineUnchanged))
+    test.assert(sarifref.baseline_from_name("updated") == Some(SarifBaselineUpdated))
+    test.assert(sarifref.baseline_from_name("absent") == Some(SarifBaselineAbsent))
+
+    test.case("suppressions")
+    test.assert(sarifref.suppression_kind_name(SarifSuppressionExternal) == "external")
+    test.assert(sarifref.suppression_kind_name(SarifSuppressionInSource) == "inSource")
+    test.assert(sarifref.suppression_status_name(SarifSuppressionAccepted) == "accepted")
+    test.assert(sarifref.suppression_status_name(SarifSuppressionUnderReview) == "underReview")
+    test.assert(sarifref.suppression_status_name(SarifSuppressionRejected) == "rejected")
+
+    test.case("and the rule that ties a level to a kind")
+    test.assert(sarifref.level_ok(SarifKindFail, SarifLevelError))
+    test.assert(not sarifref.level_ok(SarifKindPass, SarifLevelError))
+    test.assert(sarifref.level_ok(SarifKindOpen, SarifLevelNone))
+    test.assert(sarifref.level_for_kind(SarifKindReview, SarifLevelWarning)
+                == SarifLevelNone)
+    test.assert(sarifref.level_for_kind(SarifKindFail, SarifLevelNote) == SarifLevelNote)
+
+@test
+fn test_the_refs_and_the_property_bag() [io]
+    test.case("the absent ref, and what stands for it")
+    test.assert(sarifref.ref_absent(sarifref.no_artifact()))
+    test.assert(not sarifref.ref_absent(SarifArtifactRef { index: 0 }))
+    test.assert(sarifref.rule_ref_absent(sarifref.no_rule()))
+    test.assert(not sarifref.rule_ref_absent(SarifRuleRef { component: 0, index: 0 }))
+    test.assert(sarifref.rule_ref_eq(SarifRuleRef { component: 1, index: 2 },
+                                     SarifRuleRef { component: 1, index: 2 }))
+    test.assert(not sarifref.rule_ref_eq(SarifRuleRef { component: 1, index: 2 },
+                                         SarifRuleRef { component: 0, index: 2 }))
+
+    test.case("a bag answers by name, and a name it has not is None")
+    var bag: [sarifref.SarifProperty] = []
+    bag = sarifref.with_property(bag, "score", json.int(7))
+    bag = sarifref.with_property(bag, "tags", json.array([json.string("a"),
+                                                          json.string("b")]))
+    test.assert(sarifref.property(bag, "score") == Some(json.int(7)))
+    test.assert(sarifref.property(bag, "nope") == None)
+    test.assert(list.len(sarifref.property_tags(bag)) == 2)
+    test.assert(sarifref.property_tags(bag)[0] == "a")
+
+    test.case("setting a name again replaces it rather than doubling it")
+    bag = sarifref.with_property(bag, "score", json.int(9))
+    test.assert(list.len(bag) == 2)
+    test.assert(sarifref.property(bag, "score") == Some(json.int(9)))
+
+    test.case("and a bag with no tags, or a tags that is not a list, is empty")
+    var bare: [sarifref.SarifProperty] = []
+    test.assert(list.len(sarifref.property_tags(bare)) == 0)
+    bare = sarifref.with_property(bare, "tags", json.string("not a list"))
+    test.assert(list.len(sarifref.property_tags(bare)) == 0)
+
+// ── Regions, locations and the gate's questions ──────────────────────
+
+@test
+fn test_the_coordinate_systems_and_the_builders_that_make_them() [io]
+    test.case("a text region has text; a character region has chars")
+    test.assert(sarifresult.region_has_text(sarifresult.text_region(3, 1, 3, 9)))
+    test.assert(not sarifresult.region_has_chars(sarifresult.text_region(3, 1, 3, 9)))
+    test.assert(sarifresult.region_has_chars(sarifresult.char_region(10, 4)))
+    test.assert(not sarifresult.region_has_text(sarifresult.char_region(10, 4)))
+    test.assert(sarifresult.region_has_bytes(sarifresult.byte_region(10, 4)))
+    test.assert(not sarifresult.region_has_chars(sarifresult.byte_region(10, 4)))
+
+    test.case("a span is a BYTE region — the doc comment says so — and the whole\n              artifact is no region at all")
+    test.assert(sarifresult.region_has_bytes(sarifresult.region_from_span(0, 4)))
+    test.assert(sarifresult.region_is_whole(sarifresult.whole_artifact()))
+    test.assert(not sarifresult.region_is_whole(sarifresult.char_region(0, 4)))
+
+    test.case("a snippet rides along without changing the coordinates")
+    let s = sarifresult.with_snippet(sarifresult.text_region(1, 1, 1, 5), "nmae")
+    test.assert(s.snippet == "nmae")
+    test.assert(sarifresult.region_eq(s, sarifresult.text_region(1, 1, 1, 5)))
+    test.assert(not sarifresult.region_eq(s, sarifresult.text_region(2, 1, 2, 5)))
+
+@test
+fn test_a_location_needs_an_artifact_or_a_logical_name_or_both() [io]
+    let ref = SarifArtifactRef { index: 3 }
+    test.case("a physical location")
+    let physical = sarifresult.location(ref, sarifresult.text_region(1, 1, 1, 4))
+    test.assert(physical.physical.artifact.index == 3)
+    test.assert(physical.message == "")
+
+    test.case("one with a sentence of its own")
+    let said = sarifresult.location_with_message(ref, sarifresult.whole_artifact(),
+                                                 "first defined here")
+    test.assert(said.message == "first defined here")
+
+    test.case("and one that names a logical place instead of a file")
+    let named = sarifresult.logical_location(SarifLogicalRef { index: 2 })
+    test.assert(named.logical.index == 2)
+    test.assert(sarifref.ref_absent(named.physical.artifact))
+
+@test
+fn test_the_questions_a_gate_asks_of_one_result() [io]
+    let ref = SarifArtifactRef { index: 0 }
+    let where_at = sarifresult.location(ref, sarifresult.text_region(1, 1, 1, 4))
+
+    test.case("reported, and failing at or above a level")
+    let res = SarifResult { rule: SarifRuleRef { component: 0, index: 0 }, rule_id: "E1",
+                            kind: SarifKindFail, level: SarifLevelError, message: "m",
+                            message_markdown: "", locations: [where_at],
+                            related_locations: [], code_flows: [], fixes: [],
+                            suppressions: [], baseline: sarifresult.no_baseline(),
+                            fingerprints: [SarifFingerprint { name: "h", value: "v" }],
+                            properties: [] }
+    test.assert(sarifresult.is_reported(res))
+    test.assert(sarifresult.fails_at(res, SarifLevelError))
+    test.assert(sarifresult.fails_at(res, SarifLevelNote))
+    test.assert(sarifresult.fails_at(res, SarifLevelNone))
+    test.assert(sarifresult.fingerprint(res, "h") == "v")
+    test.assert(sarifresult.fingerprint(res, "nope") == "")
+    match sarifresult.primary_location(res)
+        None    => test.assert(false)
+        Some(l) => test.assert(l.physical.artifact.index == 0)
+
+    test.case("a suppression makes it not reported, and therefore not failing")
+    let hidden = SarifResult { rule: res.rule, rule_id: res.rule_id, kind: res.kind,
+                               level: res.level, message: res.message,
+                               message_markdown: "", locations: res.locations,
+                               related_locations: [], code_flows: [], fixes: [],
+                               suppressions: [SarifSuppression {
+                                   kind: SarifSuppressionInSource,
+                                   status: SarifSuppressionAccepted,
+                                   justification: "known", location: where_at }],
+                               baseline: sarifresult.no_baseline(),
+                               fingerprints: [], properties: [] }
+    test.assert(not sarifresult.is_reported(hidden))
+    test.assert(not sarifresult.fails_at(hidden, SarifLevelError))
+
+    test.case("a pass does not fail whatever its level says")
+    let passed = SarifResult { rule: res.rule, rule_id: res.rule_id, kind: SarifKindPass,
+                               level: SarifLevelNone, message: res.message,
+                               message_markdown: "", locations: res.locations,
+                               related_locations: [], code_flows: [], fixes: [],
+                               suppressions: [], baseline: sarifresult.no_baseline(),
+                               fingerprints: [], properties: [] }
+    test.assert(not sarifresult.fails_at(passed, SarifLevelNone))
+
+@test
+fn test_the_artifacts_a_result_touches_are_counted_once_each() [io]
+    let a = SarifArtifactRef { index: 0 }
+    let b = SarifArtifactRef { index: 1 }
+    test.case("a location, a related location and a fix, two artifacts")
+    let res = SarifResult { rule: sarifref.no_rule(), rule_id: "E1",
+                            kind: SarifKindFail, level: SarifLevelError, message: "m",
+                            message_markdown: "",
+                            locations: [sarifresult.location(a, sarifresult.whole_artifact()),
+                                        sarifresult.location(a, sarifresult.whole_artifact())],
+                            related_locations: [sarifresult.location(b,
+                                                     sarifresult.whole_artifact())],
+                            code_flows: [], suppressions: [],
+                            baseline: sarifresult.no_baseline(), fingerprints: [],
+                            properties: [],
+                            fixes: [SarifFix { description: "d",
+                                     changes: [SarifChange { artifact: b,
+                                        replacements: [SarifReplacement {
+                                            deleted_region: sarifresult.char_region(0, 1),
+                                            inserted_text: "x" }] }] }] }
+    test.assert(list.len(sarifresult.touched_artifacts(res)) == 2)
+    test.assert(sarifresult.fixes_are_bounded(res))
+
+    test.case("and a fix whose replacement names no region is not bounded")
+    let unbounded = SarifResult { rule: sarifref.no_rule(), rule_id: "E1",
+                                  kind: SarifKindFail, level: SarifLevelError,
+                                  message: "m", message_markdown: "", locations: [],
+                                  related_locations: [], code_flows: [], suppressions: [],
+                                  baseline: sarifresult.no_baseline(), fingerprints: [],
+                                  properties: [],
+                                  fixes: [SarifFix { description: "d",
+                                           changes: [SarifChange { artifact: a,
+                                              replacements: [SarifReplacement {
+                                                      deleted_region: sarifresult.whole_artifact(),
+                                                  inserted_text: "" }] }] }] }
+    test.assert(not sarifresult.fixes_are_bounded(unbounded))
+
+// ── The run's own reads ──────────────────────────────────────────────
+
+@test
+fn test_a_runs_questions_over_its_tables() [io]
+    var b = sarifbuild.builder_with("novo", "0.20.2", "0.20.2", "https://novo-lang.org")
+    b = sarifbuild.uri_base(b, "SRCROOT", "file:///repo/", "the source root")
+    let p = sarifbuild.artifact_under(b, "src/a.nv", "SRCROOT")
+    b = p.0
+    b = sarifbuild.add_global(b, "E1", SarifLevelWarning, "a finding about the project")
+    let run = sarifbuild.finish(b)
+
+    test.case("the artifact by ref, and the ref that names nothing")
+    test.assert(sarifrun.artifact_uri(run, p.1) == "src/a.nv")
+    test.assert(sarifrun.artifact_uri(run, SarifArtifactRef { index: 9 }) == "")
+    test.assert(sarifrun.resolve_uri(run, p.1) == "file:///repo/src/a.nv")
+    test.assert(not sarifrun.uri_base_missing(run, p.1))
+    test.assert(not sarifrun.uri_base_missing(run, SarifArtifactRef { index: 9 }))
+    match sarifrun.artifact_of(run, p.1)
+        None    => test.assert(false)
+        Some(a) => test.assert(a.uri == "src/a.nv")
+
+    test.case("an artifact with no base resolves to itself, and a missing base is said")
+    let loose = sarifbuild.artifact_under(builder_of(run), "src/b.nv", "")
+    let loose_run = sarifbuild.finish(loose.0)
+    test.assert(sarifrun.resolve_uri(loose_run, loose.1) == "src/b.nv")
+    let orphan_base = sarifbuild.artifact_under(loose.0, "src/c.nv", "NOPE")
+    test.assert(sarifrun.uri_base_missing(sarifbuild.finish(orphan_base.0), orphan_base.1))
+
+    test.case("the rule table, by ref and by identifier")
+    match sarifrun.rule_of(run, SarifRuleRef { component: 0, index: 0 })
+        None    => test.assert(false)
+        Some(r) => test.assert(r.id == "E1")
+    test.assert(sarifrun.rule_of(run, sarifref.no_rule()) == None)
+    test.assert(sarifrun.rule_of(run, SarifRuleRef { component: 0, index: 9 }) == None)
+    test.assert(sarifrun.rule_of(run, SarifRuleRef { component: 2, index: 0 }) == None)
+    match sarifrun.rule_by_id(run, "E1")
+        None    => test.assert(false)
+        Some(r) => test.assert(r.id == "E1")
+    test.assert(sarifrun.rule_by_id(run, "NOPE") == None)
+
+    test.case("the logical table, and a ref that names nothing in it")
+    test.assert(sarifrun.logical_of(run, SarifLogicalRef { index: 0 }) == None)
+    test.assert(sarifrun.logical_of(run, SarifLogicalRef { index: -1 }) == None)
+
+@test
+fn test_the_summary_a_pipeline_prints() [io]
+    var b = sarifbuild.builder("novo", "0.20.2")
+    b = sarifbuild.add_result(b, "E1", SarifLevelError, "src/a.nv",
+                              sarifresult.whole_artifact(), "one")
+    b = sarifbuild.add_result_kind(b, "E1", SarifKindPass, SarifLevelError, "src/a.nv",
+                                   sarifresult.whole_artifact(), "a pass")
+    b = sarifbuild.with_baseline(b, SarifBaselineNew)
+    b = sarifbuild.invocation(b, SarifInvocation {
+            command_line: "novo lint", arguments: ["--json"],
+            successful: true, exit_code: 0,
+            start_time_utc: "2026-10-11T09:00:00Z",
+            end_time_utc: "2026-10-11T09:00:03Z",
+            working_directory: "file:///repo" })
+    let run = sarifbuild.finish(b)
+
+    test.case("the level counts, in the order none, note, warning, error")
+    let counts = sarifrun.level_counts(run)
+    test.assert(list.len(counts) == 4)
+    test.assert(counts[0] == 1)
+    test.assert(counts[3] == 1)
+
+    test.case("the failure list, and the new results")
+    test.assert(list.len(sarifrun.failing(run, SarifLevelError)) == 1)
+    test.assert(list.len(sarifrun.failing(run, SarifLevelNote)) == 1)
+    test.assert(list.len(sarifrun.new_results(run)) == 1)
+
+    test.case("an invocation that succeeded means the empty list is 'nothing found'")
+    test.assert(sarifrun.invocations_succeeded(run))
+    test.assert(sarifrun.result_count(run) == 2)
+    test.assert(not sarifrun.run_is_clean(run))
+
+    test.case("a run with no results and no failed invocation is clean")
+    test.assert(sarifrun.run_is_clean(empty_run()))
+    test.assert(sarifrun.artifact_uri(empty_run(), SarifArtifactRef { index: 0 }) == "")
+
+@test
+fn test_the_timestamp_check_is_a_check_and_not_a_parser() [io]
+    test.case("what SARIF's profile admits")
+    test.assert(sarifrun.timestamp_ok("2026-09-11T12:00:00Z"))
+    test.assert(sarifrun.timestamp_ok("2026-09-11T12:00:00.123Z"))
+    test.assert(sarifrun.timestamp_ok("2026-12-31T23:59:60Z"))
+
+    test.case("a length that cannot hold a timestamp")
+    test.assert(not sarifrun.timestamp_ok("2026-09-11"))
+    test.assert(not sarifrun.timestamp_ok(""))
+
+    test.case("a field that is not digits")
+    test.assert(not sarifrun.timestamp_ok("20x6-09-11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-0x-11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-1xT12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T1x:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:0x:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:0xZ"))
+
+    test.case("the separators the profile fixes")
+    test.assert(not sarifrun.timestamp_ok("2026x09-11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09x11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11 12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12-00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00-00Z"))
+
+    test.case("a field outside its range")
+    test.assert(not sarifrun.timestamp_ok("2026-13-11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-00-11T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-32T12:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T24:00:00Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:60:00Z"))
+
+    test.case("the fraction, and the Z that has to end it")
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00.Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00.1234Z"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00+01:00"))
+    test.assert(not sarifrun.timestamp_ok("2026-09-11T12:00:00Z "))

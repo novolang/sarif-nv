@@ -1,0 +1,957 @@
+// sarifedge_tests.nv — every optional member, and every refusal.
+//
+// The four suites that came with the interface build SMALL logs: one
+// rule, one file, one finding, the members a first example needs.  SARIF
+// is a schema with optional camelCase members on every object, so the
+// members a real tool fills and a small example does not — an artifact's
+// roles and media type, a rule's descriptions, a plugin's semantic
+// version, a flow step's importance, a suppression's justification — are
+// exactly the members nothing else reaches.  The first test here builds
+// one run with all of them set and pins the round trip the design rests
+// on: write, read, write, and the two documents are the same bytes.
+//
+// The rest is the other half of the reader: the documents it REFUSES.
+// `read` refuses a shape or an index that is wrong — see the module
+// header and `sariferr` — and each refusal is a line nothing else runs.
+
+use std.test
+use std.list
+use std.str
+use std.json
+use sarifbuild
+use sarifref
+use sarifresult
+use sarifrun
+use sarifjson
+use sariferr
+
+// A run with every member of every object this package can set.
+//
+// The refs are interned by the builder, so the indices are consistent by
+// construction; the artifact METADATA is then filled in by hand, because
+// the builder interns a URI and nothing else.
+fn maximal_log() -> sarifrun.SarifLog
+    var b = sarifbuild.builder_with("novo", "0.8.9", "0.8.9+edge",
+                                    "https://example.invalid/novo")
+    b = sarifbuild.uri_base(b, "SRCROOT", "file:///work/", "the checkout")
+    let p = sarifbuild.artifact_under(b, "src/a.nv", "SRCROOT")
+    b = p.0
+    let a = p.1
+    let q = sarifbuild.artifact(b, "src/b.nv")
+    b = q.0
+    let bb = q.1
+    let sr = sarifbuild.set_rule(b, SarifRule {
+        id: "E1", name: "no-shadow", short_description: "a shadowed binding",
+        full_description: "A binding shadows an outer one of the same name.",
+        default_level: SarifLevelWarning, help_uri: "https://example.invalid/E1",
+        properties: sarifref.with_property([], "tags", json.array([json.string("style")])) })
+    b = sr.0
+    let e = sarifbuild.extension(b, SarifDriver {
+        name: "plug", version: "1.0", semantic_version: "1.0.0",
+        information_uri: "https://example.invalid/plug",
+        rules: [SarifRule { id: "P1", name: "plugin-rule",
+                            short_description: "a rule of a plugin",
+                            full_description: "A rule a component other than the driver declares.",
+                            default_level: SarifLevelNote, help_uri: "",
+                            properties: [] }] })
+    b = e.0
+    let rp = sarifbuild.rule_of_component(b, e.1, "P1")
+    b = rp.0
+    let plug = rp.1
+    let l1 = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "parse", fully_qualified_name: "novo.parser.parse",
+        kind: "function", parent_index: -1 })
+    b = l1.0
+    let l2 = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "Token", fully_qualified_name: "novo.parser.parse.Token",
+        kind: "type", parent_index: l1.1.index })
+    b = l2.0
+    let here = SarifLocation { physical: SarifPhysical {
+                                   artifact: a,
+                                   region: sarifresult.with_snippet(
+                                       sarifresult.text_region(13, 1, 13, 9), "nmae"),
+                                   context_region: sarifresult.text_region(10, 1, 20, 3) },
+                               logical: l2.1, message: "the shadowing binding" }
+    let other = sarifresult.location(bb, sarifresult.text_region(4, 1, 4, 6))
+    let flow = SarifCodeFlow { message: "the value flows here",
+        thread_flows: [SarifThreadFlow { id: "thread-1", message: "main",
+            locations: [SarifFlowStep { location: here, execution_order: 1,
+                                        nesting_level: 0, importance: "essential" }] }] }
+    let fix = SarifFix { description: "rename the binding",
+        changes: [SarifChange { artifact: bb,
+            replacements: [SarifReplacement {
+                deleted_region: sarifresult.text_region(4, 1, 4, 6),
+                inserted_text: "token" }] }] }
+    let sup = SarifSuppression { kind: SarifSuppressionInSource,
+                                 status: SarifSuppressionAccepted,
+                                 justification: "reviewed on 2026-10-11",
+                                 location: other }
+    let res = SarifResult { rule: plug, rule_id: "P1", kind: SarifKindFail,
+                            level: SarifLevelError, message: "a shadowed binding",
+                            message_markdown: "A **shadowed** binding.",
+                            locations: [here], related_locations: [other],
+                            code_flows: [flow], fixes: [fix], suppressions: [sup],
+                            baseline: sarifresult.baseline(SarifBaselineNew),
+                            fingerprints: [SarifFingerprint { name: "contextHash/v1",
+                                                              value: "deadbeef" }],
+                            properties: sarifref.with_property([], "confidence",
+                                                               json.string("high")) }
+    b = sarifbuild.add(b, res)
+    b = sarifbuild.invocation(b, SarifInvocation {
+        command_line: "novo check src", arguments: ["--deny", "warnings"],
+        successful: true, exit_code: 0,
+        start_time_utc: "2026-10-11T00:00:00Z",
+        end_time_utc: "2026-10-11T00:00:05Z",
+        working_directory: "file:///work/" })
+    b = sarifbuild.set_property(b, "scanId", json.string("s-1"))
+    let r = sarifbuild.finish(b)
+    var arts = r.artifacts[:]
+    arts[0] = SarifArtifact { uri: arts[0].uri, uri_base_id: arts[0].uri_base_id,
+                              mime_type: "text/x-novo", length: 4096,
+                              roles: ["analysisTarget", "tracedFile"] }
+    arts[1] = SarifArtifact { uri: arts[1].uri, uri_base_id: "", mime_type: "",
+                              length: -1, roles: ["tracedFile"] }
+    sarifbuild.log_of([SarifRun { tool: r.tool, artifacts: arts,
+                                  logical_locations: r.logical_locations,
+                                  results: r.results, invocations: r.invocations,
+                                  uri_base_ids: r.uri_base_ids,
+                                  properties: r.properties }])
+
+// ── Documents, and where the reader says no ──────────────────────────
+
+// Whether a document is refused, and where.
+fn refuses_at(doc: Str, pointer: Str) -> Bool
+    match sarifjson.read_text(doc)
+        Ok(_)  => false
+        Err(e) => sariferr.error_pointer(e) == pointer
+
+// A log of one run built out of raw members.
+fn run_doc(members: Str) -> Str
+    str.join(["{\"version\":\"2.1.0\",\"runs\":[{", members, "}]}"], "")
+
+// The same, with a tool whose driver declares `rules`.
+fn tool_doc(rules: Str, members: Str) -> Str
+    run_doc(str.join(["\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[", rules, "]}},",
+                      members],
+                      ""))
+
+// A log whose run has one driver rule `A` and one result with `members`.
+fn result_doc(members: Str) -> Str
+    tool_doc("{\"id\":\"A\"}", str.join(["\"results\":[{", members, "}]"], ""))
+
+// One result whose `locations` holds one location of `members`.
+fn location_doc(members: Str) -> Str
+    result_doc(str.join(["\"locations\":[{", members, "}]"], ""))
+
+// The same, with that location's `physicalLocation` holding `members`.
+fn physical_doc(members: Str) -> Str
+    location_doc(str.join(["\"physicalLocation\":{", members, "}"], ""))
+
+// One result whose `fixes` holds one fix of `members`.
+fn fix_doc(members: Str) -> Str
+    result_doc(str.join(["\"fixes\":[{", members, "}]"], ""))
+
+// The same, one level further down: the fix's one change.
+fn change_doc(members: Str) -> Str
+    fix_doc(str.join(["\"artifactChanges\":[{", members, "}]"], ""))
+
+// The same, one level further down: the change's one replacement.
+fn replacement_doc(members: Str) -> Str
+    change_doc(str.join(["\"replacements\":[{", members, "}]"], ""))
+
+// One result whose `codeFlows` holds one code flow of `members`.
+fn flow_doc(members: Str) -> Str
+    result_doc(str.join(["\"codeFlows\":[{", members, "}]"], ""))
+
+// The same, one level further down: the flow's one thread flow.
+fn thread_doc(members: Str) -> Str
+    flow_doc(str.join(["\"threadFlows\":[{", members, "}]"], ""))
+
+// The same, one level further down: the thread flow's one step.
+fn step_doc(members: Str) -> Str
+    thread_doc(str.join(["\"locations\":[{", members, "}]"], ""))
+
+// One result whose `suppressions` holds one suppression of `members`.
+fn suppression_doc(members: Str) -> Str
+    result_doc(str.join(["\"suppressions\":[{", members, "}]"], ""))
+
+// One run whose `invocations` holds one invocation of `members`.
+fn invocation_doc(members: Str) -> Str
+    tool_doc("", str.join(["\"invocations\":[{", members, "}]"], ""))
+
+// `depth` nested arrays around the number 1.
+fn nested(depth: Int) -> Str
+    var s = "1"
+    var i = 0
+    while i < depth
+        s = "[" + s + "]"
+        i = i + 1
+    s
+
+@test
+fn test_a_document_of_the_wrong_shape_is_refused_and_says_where() [io]
+    test.case("a value where an array belongs")
+    test.assert(refuses_at(run_doc("\"artifacts\":{}"), "/runs/0/artifacts"))
+    test.assert(refuses_at(run_doc("\"results\":{}"), "/runs/0/results"))
+    test.assert(refuses_at(run_doc("\"logicalLocations\":{}"), "/runs/0/logicalLocations"))
+    test.assert(refuses_at(run_doc("\"invocations\":{}"), "/runs/0/invocations"))
+    test.assert(refuses_at(result_doc("\"locations\":{}"), "/runs/0/results/0/locations"))
+    test.assert(refuses_at(result_doc("\"relatedLocations\":{}"),
+                           "/runs/0/results/0/relatedLocations"))
+    test.assert(refuses_at(result_doc("\"codeFlows\":{}"), "/runs/0/results/0/codeFlows"))
+    test.assert(refuses_at(result_doc("\"fixes\":{}"), "/runs/0/results/0/fixes"))
+    test.assert(refuses_at(result_doc("\"suppressions\":{}"), "/runs/0/results/0/suppressions"))
+    test.assert(refuses_at(invocation_doc("\"arguments\":7"), "/runs/0/invocations/0/arguments"))
+    test.assert(refuses_at(invocation_doc("\"arguments\":[7]"), "/runs/0/invocations/0/arguments/0"))
+
+    test.case("a value where an object belongs")
+    test.assert(refuses_at(run_doc("\"tool\":7"), "/runs/0/tool"))
+    test.assert(refuses_at(run_doc("\"tool\":{\"driver\":7}"), "/runs/0/tool/driver"))
+    test.assert(refuses_at(physical_doc("\"artifactLocation\":7"),
+                           "/runs/0/results/0/locations/0/physicalLocation/artifactLocation"))
+    test.assert(refuses_at(physical_doc("\"region\":7"),
+                           "/runs/0/results/0/locations/0/physicalLocation/region"))
+    test.assert(refuses_at(physical_doc("\"contextRegion\":7"),
+                           "/runs/0/results/0/locations/0/physicalLocation/contextRegion"))
+    test.assert(refuses_at(location_doc("\"message\":7"),
+                           "/runs/0/results/0/locations/0/message"))
+    test.assert(refuses_at(result_doc("\"message\":7"), "/runs/0/results/0/message"))
+    test.assert(refuses_at(run_doc("\"artifacts\":[{\"location\":7}]"),
+                           "/runs/0/artifacts/0/location"))
+    test.assert(refuses_at(tool_doc("{\"shortDescription\":7}", "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/shortDescription"))
+    test.assert(refuses_at(tool_doc("{\"fullDescription\":7}", "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/fullDescription"))
+    test.assert(refuses_at(tool_doc("{\"defaultConfiguration\":7}", "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/defaultConfiguration"))
+    test.assert(refuses_at(invocation_doc("\"workingDirectory\":7"),
+                           "/runs/0/invocations/0/workingDirectory"))
+    test.assert(refuses_at(run_doc("\"originalUriBaseIds\":{\"A\":{\"description\":7}}"),
+                           "/runs/0/originalUriBaseIds/A/description"))
+    test.assert(refuses_at(step_doc("\"location\":7"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0/location"))
+    test.assert(refuses_at(thread_doc("\"message\":7"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0/message"))
+    test.assert(refuses_at(flow_doc("\"message\":7"), "/runs/0/results/0/codeFlows/0/message"))
+    test.assert(refuses_at(replacement_doc("\"insertedContent\":7"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/replacements/0/insertedContent"))
+    test.assert(refuses_at(replacement_doc("\"deletedRegion\":7"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/replacements/0/deletedRegion"))
+    test.assert(refuses_at(fix_doc("\"description\":7"), "/runs/0/results/0/fixes/0/description"))
+    test.assert(refuses_at(change_doc("\"artifactLocation\":7"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/artifactLocation"))
+    test.assert(refuses_at(suppression_doc("\"location\":7"),
+                           "/runs/0/results/0/suppressions/0/location"))
+    test.assert(refuses_at(result_doc("\"rule\":7"), "/runs/0/results/0/rule"))
+    test.assert(refuses_at(result_doc("\"rule\":{\"toolComponent\":7}"),
+                           "/runs/0/results/0/rule/toolComponent"))
+    test.assert(refuses_at(result_doc("\"properties\":7"), "/runs/0/results/0/properties"))
+    test.assert(refuses_at(result_doc("\"partialFingerprints\":7"),
+                           "/runs/0/results/0/partialFingerprints"))
+    test.assert(refuses_at(run_doc("\"properties\":7"), "/runs/0/properties"))
+
+    test.case("a spelling the format does not define")
+    test.assert(refuses_at(result_doc("\"kind\":7"), "/runs/0/results/0/kind"))
+    test.assert(refuses_at(result_doc("\"level\":7"), "/runs/0/results/0/level"))
+    test.assert(refuses_at(result_doc("\"baselineState\":7"), "/runs/0/results/0/baselineState"))
+    test.assert(refuses_at(result_doc("\"baselineState\":\"nope\""),
+                           "/runs/0/results/0/baselineState"))
+    test.assert(refuses_at(tool_doc("{\"defaultConfiguration\":{\"level\":7}}", "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/defaultConfiguration/level"))
+    test.assert(refuses_at(tool_doc("{\"defaultConfiguration\":{\"level\":\"fatal\"}}",
+                                    "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/defaultConfiguration/level"))
+    test.assert(refuses_at(suppression_doc("\"kind\":7"),
+                           "/runs/0/results/0/suppressions/0/kind"))
+    test.assert(refuses_at(suppression_doc("\"kind\":\"nope\""),
+                           "/runs/0/results/0/suppressions/0/kind"))
+    test.assert(refuses_at(suppression_doc("\"status\":7"),
+                           "/runs/0/results/0/suppressions/0/status"))
+    test.assert(refuses_at(suppression_doc("\"status\":\"nope\""),
+                           "/runs/0/results/0/suppressions/0/status"))
+    test.assert(refuses_at(result_doc("\"partialFingerprints\":{\"a\":7}"),
+                           "/runs/0/results/0/partialFingerprints/a"))
+    test.assert(refuses_at(run_doc("\"artifacts\":[{\"roles\":[7]}]"),
+                           "/runs/0/artifacts/0/roles/0"))
+
+    test.case("an index outside its table")
+    test.assert(refuses_at(physical_doc("\"artifactLocation\":{\"index\":9}"),
+                           "/runs/0/results/0/locations/0/physicalLocation/artifactLocation/index"))
+    test.assert(refuses_at(change_doc("\"artifactLocation\":{\"index\":9}"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/artifactLocation/index"))
+    test.assert(refuses_at(run_doc("\"logicalLocations\":[{\"name\":\"a\",\"parentIndex\":5}]"),
+                           "/runs/0/logicalLocations/0/parentIndex"))
+    test.assert(refuses_at(location_doc("\"logicalLocations\":[{\"index\":9}]"),
+                           "/runs/0/results/0/locations/0/logicalLocations/0/index"))
+    test.assert(refuses_at(result_doc("\"rule\":{\"toolComponent\":{\"index\":9}}"),
+                           "/runs/0/results/0/rule/toolComponent/index"))
+
+    test.case("an element of the wrong kind")
+    test.assert(refuses_at(run_doc("\"results\":[7]"), "/runs/0/results/0"))
+    test.assert(refuses_at(run_doc("\"artifacts\":[7]"), "/runs/0/artifacts/0"))
+    test.assert(refuses_at(run_doc("\"logicalLocations\":[7]"), "/runs/0/logicalLocations/0"))
+    test.assert(refuses_at(run_doc("\"invocations\":[7]"), "/runs/0/invocations/0"))
+    test.assert(refuses_at(run_doc("\"tool\":{\"extensions\":[7]}"),
+                           "/runs/0/tool/extensions/0"))
+    test.assert(refuses_at(run_doc("\"tool\":{\"driver\":{\"rules\":[7]}}"),
+                           "/runs/0/tool/driver/rules/0"))
+    test.assert(refuses_at(result_doc("\"locations\":[7]"), "/runs/0/results/0/locations/0"))
+    test.assert(refuses_at(result_doc("\"codeFlows\":[7]"), "/runs/0/results/0/codeFlows/0"))
+    test.assert(refuses_at(flow_doc("\"threadFlows\":[7]"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0"))
+    test.assert(refuses_at(thread_doc("\"locations\":[7]"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0"))
+    test.assert(refuses_at(fix_doc("\"artifactChanges\":[7]"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0"))
+    test.assert(refuses_at(change_doc("\"replacements\":[7]"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/replacements/0"))
+    test.assert(refuses_at(result_doc("\"fixes\":[7]"), "/runs/0/results/0/fixes/0"))
+    test.assert(refuses_at(result_doc("\"suppressions\":[7]"),
+                           "/runs/0/results/0/suppressions/0"))
+    test.assert(refuses_at(location_doc("\"logicalLocations\":[7]"),
+                           "/runs/0/results/0/locations/0/logicalLocations/0"))
+    test.assert(refuses_at("{\"version\":\"2.1.0\",\"runs\":[7]}", "/runs/0"))
+
+    test.case("a whole document that is not a log")
+    test.assert(refuses_at("[1]", ""))
+    test.assert(refuses_at("{\"version\":7,\"runs\":[]}", "/version"))
+    test.assert(refuses_at("{\"version\":\"1.0.0\",\"runs\":[]}", ""))
+
+@test
+fn test_the_members_a_document_may_leave_out_are_read_as_absent() [io]
+    test.case("no tool at all is an empty driver rather than a refusal")
+    match sarifjson.read_text(run_doc("\"results\":[]"))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].tool.driver.name == "")
+
+    test.case("a bare location that names no artifact and says nothing")
+    match sarifjson.read_text(location_doc("\"message\":{\"text\":\"here\"}"))
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            test.assert(sarifrun.artifact_uri(back.runs[0],
+                                              back.runs[0].results[0].locations[0].physical.artifact) == "")
+
+    test.case("a result that names its rule only by identifier")
+    match sarifjson.read_text(result_doc("\"ruleId\":\"A\",\"message\":{\"text\":\"m\"}"))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].rule.component == 0)
+
+    test.case("a result that names no rule at all")
+    match sarifjson.read_text(result_doc(""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(sarifref.rule_ref_absent(back.runs[0].results[0].rule))
+
+    test.case("a kind other than fail leaves the level at none")
+    match sarifjson.read_text(result_doc("\"ruleId\":\"A\",\"kind\":\"pass\""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].level == SarifLevelNone)
+
+    test.case("a suppression with no location is not a refusal")
+    match sarifjson.read_text(suppression_doc("\"justification\":\"reviewed\""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].suppressions[0].kind
+                                == SarifSuppressionExternal)
+
+    test.case("every suppression spelling the format defines reads back")
+    match sarifjson.read_text(suppression_doc("\"kind\":\"external\""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].suppressions[0].kind
+                                == SarifSuppressionExternal)
+    match sarifjson.read_text(suppression_doc("\"status\":\"underReview\""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].suppressions[0].status
+                                == SarifSuppressionUnderReview)
+    match sarifjson.read_text(suppression_doc("\"status\":\"rejected\""))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].suppressions[0].status
+                                == SarifSuppressionRejected)
+
+    test.case("an artifact named by URI is interned into the table it was not in")
+    let doc = str.join(["{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":",
+                        "{\"name\":\"t\",\"rules\":[]}},\"artifacts\":[],",
+                        "\"results\":[{\"ruleId\":\"A\",\"locations\":[",
+                        "{\"physicalLocation\":{\"artifactLocation\":",
+                        "{\"uri\":\"src/a.nv\",\"uriBaseId\":\"ROOT\"}}}]}]}]}"],
+                        "")
+    match sarifjson.read_text(doc)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            test.assert(list.len(back.runs[0].artifacts) == 1)
+            test.assert(back.runs[0].artifacts[0].uri_base_id == "ROOT")
+
+    test.case("the depth bound is refused through an array as well as an object")
+    test.assert(not refuses_at("{\"version\":\"2.1.0\",\"runs\":[{}]}", "/runs/0"))
+    match sarifjson.read_with_depth(json.parse("{\"version\":\"2.1.0\",\"runs\":[{}]}") ?? json.null(), 2)
+        Ok(_)  => test.assert(false)
+        Err(e) => test.assert(sariferr.error_pointer(e) == "/runs/0")
+
+    test.case("a run read on its own is bounded the same way")
+    match json.parse(str.join(["{\"version\":\"2.1.0\",\"runs\":[],\"x\":",
+                               nested(80), "}"],
+                               ""))
+        None    => test.assert(false)
+        Some(v) => match sarifjson.read_run(v)
+            Ok(_)  => test.assert(false)
+            Err(e) => test.assert(sariferr.error_pointer(e) != "")
+
+@test
+fn test_a_run_with_every_member_set_round_trips_byte_for_byte() [io]
+    let doc = maximal_log()
+    let first = sarifjson.write_text(doc)
+
+    test.case("write, read, write: the second document is the first one")
+    match sarifjson.read_text(first)
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(sarifjson.write_text(back) == first)
+
+    test.case("and the read back log has every member the written one had")
+    match sarifjson.read_text(first)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            let r = back.runs[0]
+            test.assert(r.artifacts[0].mime_type == "text/x-novo")
+            test.assert(r.artifacts[0].length == 4096)
+            test.assert(list.len(r.artifacts[0].roles) == 2)
+            test.assert(r.artifacts[0].uri_base_id == "SRCROOT")
+            test.assert(r.tool.driver.semantic_version == "0.8.9+edge")
+            test.assert(r.tool.driver.information_uri == "https://example.invalid/novo")
+            test.assert(list.len(r.tool.extensions) == 1)
+            test.assert(r.tool.extensions[0].semantic_version == "1.0.0")
+            test.assert(list.len(r.logical_locations) == 2)
+            test.assert(r.logical_locations[1].parent_index == 0)
+            test.assert(list.len(r.uri_base_ids) == 1)
+            test.assert(r.uri_base_ids[0].description == "the checkout")
+            test.assert(list.len(r.invocations) == 1)
+            test.assert(r.invocations[0].working_directory == "file:///work/")
+            test.assert(list.len(r.invocations[0].arguments) == 2)
+            test.assert(r.results[0].message_markdown == "A **shadowed** binding.")
+            test.assert(list.len(r.results[0].code_flows[0].thread_flows[0].locations) == 1)
+            test.assert(r.results[0].code_flows[0].thread_flows[0].locations[0].importance
+                        == "essential")
+            test.assert(r.results[0].fixes[0].changes[0].replacements[0].inserted_text
+                        == "token")
+            test.assert(r.results[0].suppressions[0].justification
+                        == "reviewed on 2026-10-11")
+            test.assert(r.results[0].baseline.present)
+            test.assert(r.results[0].fingerprints[0].value == "deadbeef")
+            test.assert(r.results[0].rule.component == 1)
+            test.assert(sarifresult.fingerprint(r.results[0], "contextHash/v1")
+                        == "deadbeef")
+
+    test.case("nothing had to be dropped to do it, because this package wrote it")
+    match json.parse(first)
+        None    => test.assert(false)
+        Some(v) => test.assert(list.len(sarifjson.unknown_members(v)) == 0)
+
+    test.case("and a run with every member set is a run with nothing wrong with it")
+    test.assert(list.len(sarifjson.problems(doc)) == 0)
+    test.assert(sarifjson.is_sound(doc))
+
+    test.case("the members really are in the document, not lost on the way")
+    match json.parse(first)
+        None    => test.assert(false)
+        Some(v) =>
+            let runs = json.get_list(v, "runs") ?? []
+            test.assert(list.len(runs) == 1)
+            let arts = json.get_list(runs[0], "artifacts") ?? []
+            test.assert(json.get_str(arts[0], "mimeType") == Some("text/x-novo"))
+            test.assert(json.get_int(arts[0], "length") == Some(4096))
+            match json.get_list(arts[0], "roles")
+                None     => test.assert(false)
+                Some(rs) => test.assert(list.len(rs) == 2)
+            let tool = json.get(runs[0], "tool") ?? runs[0]
+            let drv = json.get(tool, "driver") ?? tool
+            test.assert(json.get_str(drv, "semanticVersion") == Some("0.8.9+edge"))
+
+// ── What a reader reports rather than refuses ────────────────────────
+
+// A log a schema validator accepts and a consumer misreads: all eight of
+// the problems `sariferr` names, in one document.
+//
+// Read, not refused, which is the whole distinction the two types make.
+fn faulty_doc() -> Str
+    str.join([
+      "{\"version\":\"2.1.0\",\"runs\":[{",
+      "\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":[",
+        "{\"id\":\"A\",\"name\":\"a1\",\"shortDescription\":{\"text\":\"first\"}},",
+        "{\"id\":\"A\",\"name\":\"a2\",\"shortDescription\":{\"text\":\"second\"}},",
+        "{\"id\":\"\",\"name\":\"x\"}]}},",
+      "\"artifacts\":[",
+        "{\"location\":{\"uri\":\"./src/a.nv\"}},",
+        "{\"location\":{\"uri\":\"src/x/../a.nv\"}},",
+        "{\"location\":{\"uri\":\"src/orphan.nv\"}},",
+        "{\"location\":{\"uri\":\"src/flow.nv\"}},",
+        "{\"location\":{\"uri\":\"src/fix.nv\"}},",
+        "{\"location\":{\"uri\":\"src/sup.nv\"}}],",
+      "\"invocations\":[{\"startTimeUtc\":\"yesterday\",\"endTimeUtc\":\"tomorrow\"}],",
+      "\"results\":[",
+        "{\"ruleId\":\"B\",\"ruleIndex\":0,\"kind\":\"pass\",\"level\":\"error\",",
+        "\"message\":{\"text\":\"first\"},\"locations\":[",
+          "{\"physicalLocation\":{\"artifactLocation\":{\"index\":0},",
+            "\"region\":{\"startLine\":1,\"startColumn\":5,\"charOffset\":9},",
+            "\"contextRegion\":{\"startLine\":1,\"startColumn\":6,\"charOffset\":9}}},",
+          "{\"physicalLocation\":{\"artifactLocation\":{\"index\":0},",
+            "\"region\":{\"startLine\":4,\"startColumn\":1,\"charOffset\":0}}}]},",
+        "{\"ruleId\":\"A\",\"ruleIndex\":0,\"message\":{\"text\":\"second\"},",
+        "\"relatedLocations\":[{\"physicalLocation\":",
+        "{\"artifactLocation\":{\"index\":1}}}],",
+        "\"fixes\":[{\"artifactChanges\":[{\"artifactLocation\":{\"index\":4},",
+        "\"replacements\":[{\"deletedRegion\":{\"startLine\":0,\"startColumn\":0}},",
+        "{\"deletedRegion\":{\"startLine\":2,\"startColumn\":1}}]}]}]},",
+        "{\"ruleId\":\"A\",\"ruleIndex\":1,\"message\":{\"text\":\"third\"},",
+        "\"codeFlows\":[{\"threadFlows\":[{\"locations\":[{\"location\":",
+        "{\"physicalLocation\":{\"artifactLocation\":{\"index\":3}}}}]}]}],",
+        "\"suppressions\":[{\"location\":{\"physicalLocation\":",
+        "{\"artifactLocation\":{\"index\":5}}}}]}",
+      "]}]}"],
+      "")
+
+@test
+fn test_a_log_with_every_fault_a_reader_reports_still_parses() [io]
+    let doc = faulty_doc()
+
+    test.case("it is read, because none of these is a refusal")
+    var parsed = sarifrun.empty_log()
+    match sarifjson.read_text(doc)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            parsed = back
+    let run = parsed.runs[0]
+
+    test.case("every fault a schema validator would pass is reported")
+    let ps = sarifjson.problems(parsed)
+    test.assert(list.len(ps) == 10)
+
+    test.case("and each one's sentence names the thing that is wrong")
+    var text = ""
+    for p in ps
+        text = text + sariferr.problem_message(p) + "\n"
+    test.assert(str.contains(text,
+        "result 0: ruleId \"B\" and the rule at its index, \"A\", are two rules"))
+    test.assert(str.contains(text,
+        "result 0: kind \"pass\" carries level \"error\""))
+    test.assert(str.contains(text,
+        "result 0: location 0 carries a text position and a character offset that cannot both be right"))
+    test.assert(str.contains(text,
+        "result 1: fix 0 replaces a region that says nothing"))
+    test.assert(str.contains(text,
+        "artifacts 0 and 1 are two spellings of src/x/../a.nv"))
+    test.assert(str.contains(text, "rule \"A\" is declared at 0 and again at 1"))
+    test.assert(str.contains(text, "artifact 2 (src/orphan.nv) is pointed at by no result"))
+    test.assert(str.contains(text,
+        "the timestamp \"yesterday\" at /invocations/0/startTimeUtc"))
+    test.assert(str.contains(text,
+        "the timestamp \"tomorrow\" at /invocations/0/endTimeUtc"))
+
+    test.case("seven of them are serious and three are untidy")
+    var serious = 0
+    for p in ps
+        if sariferr.problem_is_serious(p)
+            serious = serious + 1
+    test.assert(serious == 7)
+    test.assert(not sarifjson.is_sound(parsed))
+
+    test.case("one result's problems, asked about on their own")
+    test.assert(list.len(sarifjson.result_problems(run, 0)) == 4)
+    test.assert(list.len(sarifjson.result_problems(run, 1)) == 1)
+    test.assert(list.len(sarifjson.result_problems(run, 2)) == 0)
+    test.assert(list.len(sarifjson.result_problems(run, -1)) == 0)
+    test.assert(list.len(sarifjson.result_problems(run, 9)) == 0)
+    test.assert(list.len(sarifjson.duplicate_artifacts(run)) == 1)
+    test.assert(list.len(sarifjson.run_problems(run)) == 10)
+
+    test.case("a result that points at an artifact only its fix names still counts")
+    test.assert(list.len(sarifresult.touched_artifacts(run.results[1])) == 2)
+
+    test.case("a result that points at nothing touches nothing")
+    let bare = SarifResult { rule: sarifref.no_rule(), rule_id: "", kind: SarifKindFail,
+                             level: SarifLevelWarning, message: "", message_markdown: "",
+                             locations: [sarifresult.location(
+                                             sarifref.no_artifact(),
+                                             sarifresult.whole_artifact())],
+                             related_locations: [], code_flows: [], fixes: [],
+                             suppressions: [], baseline: sarifresult.no_baseline(),
+                             fingerprints: [], properties: [] }
+    test.assert(list.len(sarifresult.touched_artifacts(bare)) == 0)
+
+// ── A refusal rendered ───────────────────────────────────────────────
+
+@test
+fn test_every_refusal_class_renders_a_sentence_and_a_pointer() [io]
+    test.case("the text was not JSON at all")
+    let not_json = SarifNotJson("the parser answered no value")
+    test.assert(sariferr.error_pointer(not_json) == "")
+    test.assert(sariferr.render(not_json, "out.sarif")
+                == "out.sarif: the text is not JSON: the parser answered no value")
+    test.assert(not_json.message() == "the text is not JSON: the parser answered no value")
+
+    test.case("a member of the wrong shape")
+    let shape = SarifBadShape("/runs", "an array", "number")
+    test.assert(sariferr.error_pointer(shape) == "/runs")
+    test.assert(sariferr.render(shape, "out.sarif")
+                == "out.sarif#/runs: an array expected at /runs, found number")
+
+    test.case("a version this package does not read")
+    test.assert(sariferr.render(SarifWrongVersion("1.0.0"), "out.sarif")
+                == "out.sarif: this is not a SARIF 2.1.0 log; its version says 1.0.0")
+
+    test.case("an index outside its table")
+    let oob = SarifIndexOutOfRange("/runs/0/results/0/ruleIndex", 7, 3)
+    test.assert(sariferr.error_pointer(oob) == "/runs/0/results/0/ruleIndex")
+    test.assert(sariferr.render(oob, "out.sarif")
+                == "out.sarif#/runs/0/results/0/ruleIndex: the index 7 at /runs/0/results/0/ruleIndex is outside a table of 3")
+
+    test.case("a spelling the format does not define")
+    let spelling = SarifUnknownEnum("/runs/0/results/0/level", "level", "fatal")
+    test.assert(sariferr.error_pointer(spelling) == "/runs/0/results/0/level")
+    test.assert(sariferr.render(spelling, "out.sarif")
+                == "out.sarif#/runs/0/results/0/level: level is fatal at /runs/0/results/0/level, which is not a spelling the format defines")
+
+    test.case("a document that nests deeper than the reader follows")
+    let deep = SarifTooDeep("/x/0/0", 64)
+    test.assert(sariferr.error_pointer(deep) == "/x/0/0")
+    test.assert(sariferr.render(deep, "out.sarif")
+                == "out.sarif#/x/0/0: the document nests deeper than 64 levels at /x/0/0")
+
+// ── Merging ──────────────────────────────────────────────────────────
+
+@test
+fn test_merging_two_runs_re_interns_the_second_runs_refs() [io]
+    // `a` says nothing about its own tool, so the merge takes `b`'s facts;
+    // it declares a base and an artifact `b` also declares.
+    var a = sarifbuild.builder("", "")
+    a = sarifbuild.uri_base(a, "R1", "file:///a/", "a's base")
+    let shared = sarifbuild.artifact(a, "src/shared.nv")
+    a = shared.0
+    let a_rule = sarifbuild.rule(a, "A")
+    a = a_rule.0
+    a = sarifbuild.set_property(a, "origin", json.string("a"))
+    a = sarifbuild.add_result(a, "A", SarifLevelWarning, "src/shared.nv",
+                              sarifresult.text_region(1, 1, 1, 2), "a's finding")
+    let run_a = sarifbuild.finish(a)
+
+    // `b` re-declares the base and the artifact, adds one of each that is
+    // new, forward-references a logical parent, declares a rule `a`
+    // already has, and brings an extension with rules of its own.
+    var b = sarifbuild.builder_with("novo", "0.8.9", "0.8.9+merge",
+                                    "https://example.invalid/novo")
+    b = sarifbuild.uri_base(b, "R1", "file:///b/", "b's spelling of R1")
+    b = sarifbuild.uri_base(b, "R1", "file:///b2/", "b's second spelling")
+    b = sarifbuild.uri_base(b, "R2", "file:///b2root/", "b's own base")
+    let p0 = sarifbuild.artifact(b, "src/shared.nv")
+    b = p0.0
+    let p1 = sarifbuild.artifact_under(b, "src/only-b.nv", "R2")
+    b = p1.0
+    let child = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "Token", fully_qualified_name: "novo.Token", kind: "type", parent_index: 1 })
+    b = child.0
+    let same = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "Token", fully_qualified_name: "novo.Token", kind: "type", parent_index: 1 })
+    b = same.0
+    let parent = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "parse", fully_qualified_name: "novo.parse", kind: "function",
+        parent_index: -1 })
+    b = parent.0
+    // A parent that is earlier in the same table: it is placed correctly by
+    // the first pass, so the repair pass finds nothing to do.
+    let earlier = sarifbuild.logical(b, SarifLogicalLocation {
+        name: "param", fully_qualified_name: "novo.param", kind: "parameter",
+        parent_index: 0 })
+    b = earlier.0
+    let via_driver = sarifbuild.rule_of_component(b, 0, "A")
+    b = via_driver.0
+    test.assert(via_driver.1.component == 0)
+    test.assert(via_driver.1.index == 0)
+    let ra = sarifbuild.set_rule(b, SarifRule {
+        id: "A", name: "b's A", short_description: "b's word for A",
+        full_description: "", default_level: SarifLevelWarning, help_uri: "",
+        properties: [] })
+    b = ra.0
+    let rb = sarifbuild.set_rule(b, SarifRule {
+        id: "B", name: "b's B", short_description: "", full_description: "",
+        default_level: SarifLevelNote, help_uri: "", properties: [] })
+    b = rb.0
+    let ext = sarifbuild.extension(b, SarifDriver {
+        name: "plug", version: "1.0", semantic_version: "1.0.0",
+        information_uri: "", rules: [
+            SarifRule { id: "P1", name: "p1", short_description: "", full_description: "",
+                        default_level: SarifLevelWarning, help_uri: "", properties: [] },
+            SarifRule { id: "P2", name: "p2", short_description: "", full_description: "",
+                        default_level: SarifLevelWarning, help_uri: "", properties: [] }] })
+    b = ext.0
+
+    let here = SarifLocation { physical: SarifPhysical {
+                                   artifact: p1.1,
+                                   region: sarifresult.text_region(3, 1, 3, 4),
+                                   context_region: sarifresult.whole_artifact() },
+                               logical: child.1, message: "b's location" }
+    let gone = SarifLocation { physical: SarifPhysical {
+                                   artifact: sarifref.no_artifact(),
+                                   region: sarifresult.whole_artifact(),
+                                   context_region: sarifresult.whole_artifact() },
+                               logical: SarifLogicalRef { index: -1 }, message: "" }
+    let res_b = SarifResult { rule: SarifRuleRef { component: 1, index: 1 }, rule_id: "P2",
+        kind: SarifKindFail, level: SarifLevelError, message: "b's finding",
+        message_markdown: "", locations: [here], related_locations: [here, gone],
+        code_flows: [SarifCodeFlow { message: "the flow", thread_flows: [
+            SarifThreadFlow { id: "t1", message: "main", locations: [
+                SarifFlowStep { location: here, execution_order: 1, nesting_level: 0,
+                                importance: "important" }] }] }],
+        fixes: [SarifFix { description: "b's fix", changes: [SarifChange { artifact: p1.1,
+            replacements: [SarifReplacement {
+                deleted_region: sarifresult.text_region(3, 1, 3, 4),
+                inserted_text: "b" }] }] }],
+        suppressions: [SarifSuppression { kind: SarifSuppressionExternal,
+            status: SarifSuppressionAccepted, justification: "b says so",
+            location: here }],
+        baseline: sarifresult.no_baseline(), fingerprints: [], properties: [] }
+    b = sarifbuild.add(b, res_b)
+    // Two results whose rule refs the merge cannot place: a component the
+    // merged tool has not got, and an index its table has not got.
+    b = sarifbuild.add(b, SarifResult { rule: SarifRuleRef { component: 9, index: 0 },
+        rule_id: "lost", kind: SarifKindFail, level: SarifLevelWarning, message: "",
+        message_markdown: "", locations: [], related_locations: [], code_flows: [],
+        fixes: [], suppressions: [], baseline: sarifresult.no_baseline(),
+        fingerprints: [], properties: [] })
+    b = sarifbuild.add(b, SarifResult { rule: SarifRuleRef { component: 0, index: 9 },
+        rule_id: "lost", kind: SarifKindFail, level: SarifLevelWarning, message: "",
+        message_markdown: "", locations: [], related_locations: [], code_flows: [],
+        fixes: [], suppressions: [], baseline: sarifresult.no_baseline(),
+        fingerprints: [], properties: [] })
+    b = sarifbuild.invocation(b, SarifInvocation {
+        command_line: "novo check", arguments: [], successful: true, exit_code: 0,
+        start_time_utc: "2026-10-11T00:00:00Z", end_time_utc: "", working_directory: "" })
+    b = sarifbuild.set_property(b, "origin", json.string("b"))
+    test.assert(sarifbuild.rule_count(b) == 4)
+    let run_b = sarifbuild.finish(b)
+
+    let merged = sarifbuild.merge(run_a, run_b)
+
+    test.case("the tool of the run that said nothing is filled in from the other")
+    test.assert(merged.tool.driver.name == "novo")
+    test.assert(merged.tool.driver.version == "0.8.9")
+    test.assert(merged.tool.driver.semantic_version == "0.8.9+merge")
+    test.assert(merged.tool.driver.information_uri == "https://example.invalid/novo")
+
+    test.case("an artifact both runs declare is interned once and the first one wins")
+    test.assert(list.len(merged.artifacts) == 2)
+    test.assert(merged.artifacts[0].uri == "src/shared.nv")
+    test.assert(merged.artifacts[1].uri == "src/only-b.nv")
+
+    test.case("every result points into the merged tables")
+    test.assert(list.len(merged.results) == 4)
+    test.assert(merged.results[0].locations[0].physical.artifact.index == 0)
+    test.assert(merged.results[1].locations[0].physical.artifact.index == 1)
+    test.assert(merged.results[1].related_locations[1].physical.artifact.index == -1)
+    test.assert(merged.results[1].fixes[0].changes[0].artifact.index == 1)
+    test.assert(merged.results[1].suppressions[0].location.physical.artifact.index == 1)
+    test.assert(merged.results[1].code_flows[0].thread_flows[0].locations[0].location.physical.artifact.index == 1)
+
+    test.case("a rule ref is rewritten through its component's map")
+    test.assert(merged.results[1].rule.component == 1)
+    test.assert(merged.results[1].rule.index == 1)
+    test.assert(merged.results[2].rule.index == -1)
+    test.assert(merged.results[3].rule.index == -1)
+    match sarifrun.rule_of(merged, merged.results[1].rule)
+        None    => test.assert(false)
+        Some(r) => test.assert(r.id == "P2")
+
+    test.case("a logical location's parent is placed after the whole table is")
+    test.assert(list.len(merged.logical_locations) == 3)
+    test.assert(merged.logical_locations[0].parent_index == 1)
+    test.assert(merged.logical_locations[1].parent_index == -1)
+    test.assert(merged.logical_locations[2].parent_index == 0)
+    test.assert(merged.results[1].locations[0].logical.index == 0)
+
+    test.case("the first run's base wins and the second run's new one is added")
+    test.assert(list.len(merged.uri_base_ids) == 2)
+    test.assert(merged.uri_base_ids[0].id == "R1")
+    test.assert(merged.uri_base_ids[0].uri == "file:///a/")
+    test.assert(merged.uri_base_ids[1].id == "R2")
+
+    test.case("the second run's invocation is carried over and its property replaces")
+    test.assert(list.len(merged.invocations) == 1)
+    test.assert(list.len(merged.properties) == 1)
+    test.assert(json.to_str(merged.properties[0].value) == Some("b"))
+
+    test.case("and the merged run still resolves every URI it carries")
+    test.assert(merged.artifacts[1].uri_base_id == "R2")
+    test.assert(sarifrun.resolve_uri(merged, merged.results[1].locations[0].physical.artifact) == "file:///b2root/src/only-b.nv")
+    test.assert(sarifrun.resolve_uri(merged, merged.results[0].locations[0].physical.artifact) == "src/shared.nv")
+    test.assert(not sarifrun.uri_base_missing(merged, merged.results[0].locations[0].physical.artifact))
+
+// ── Anonymous members ────────────────────────────────────────────────
+
+@test
+fn test_members_this_package_has_no_field_for_are_reported_by_pointer() [io]
+    let doc = str.join([
+      "{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"t\",",
+      "\"rules\":[{\"id\":\"A\",\"help\":{\"text\":\"x\"}}],\"taxa\":1},",
+      "\"~/x\":2},\"results\":[{\"ruleId\":\"A\",",
+      "\"webRequest\":{\"protocol\":\"https\"},",
+      "\"properties\":{\"a/b\":{\"x/y\":1},\"~\":2}}],",
+      "\"graphs\":[],\"conversion\":{}}]}"],
+      "")
+
+    test.case("a member at each depth, with the pointer that names it")
+    match json.parse(doc)
+        None    => test.assert(false)
+        Some(v) =>
+            let ps = sarifjson.unknown_members(v)
+            var text = ""
+            for p in ps
+                text = text + p + "\n"
+            test.assert(str.contains(text, "/runs/0/tool/driver/taxa\n"))
+            test.assert(str.contains(text, "/runs/0/tool/driver/rules/0/help\n"))
+            test.assert(str.contains(text, "/runs/0/tool/~0~1x\n"))
+            test.assert(str.contains(text, "/runs/0/results/0/webRequest\n"))
+            test.assert(str.contains(text, "/runs/0/graphs\n"))
+            test.assert(str.contains(text, "/runs/0/conversion\n"))
+            test.assert(list.len(ps) == 6)
+
+    test.case("a property bag's keys are data, and nothing inside it is dropped")
+    match json.parse(doc)
+        None    => test.assert(false)
+        Some(v) =>
+            let runs = json.get_list(v, "runs") ?? []
+            // Naming the list before indexing it is a workaround, not
+            // taste: `(json.get_list(...) ?? [])[0]` leaks the element
+            // under the RC checker.  The filing is
+            // `language/a-list-read-from-qq-and-indexed-in-one-expression-is-leaked`.
+            let in_run = json.get_list(runs[0], "results") ?? []
+            let res = in_run[0]
+            let bag = json.get(res, "properties") ?? res
+            test.assert(list.len(json.keys(bag)) == 2)
+
+    test.case("nothing is reported when there is nothing anonymous")
+    match json.parse(sarifjson.write_text(maximal_log()))
+        None    => test.assert(false)
+        Some(v) => test.assert(list.len(sarifjson.unknown_members(v)) == 0)
+
+    test.case("a member of a shape that is not there is walked no further")
+    match json.parse("{\"version\":\"2.1.0\",\"runs\":[{\"tool\":7,\"properties\":7}]}")
+        None    => test.assert(false)
+        Some(v) => test.assert(list.len(sarifjson.unknown_members(v)) == 0)
+
+// ── The reader's remaining refusals ──────────────────────────────────
+
+@test
+fn test_the_smaller_refusals_and_the_members_a_document_omits() [io]
+    test.case("a null member is read as an absent one")
+    match sarifjson.read_text(result_doc(str.join([
+            "\"kind\":null,\"level\":null,\"ruleId\":null,\"baselineState\":null,",
+            "\"properties\":null,\"partialFingerprints\":null,\"locations\":null,",
+            "\"rule\":null,\"message\":null"],
+            "")))
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            test.assert(back.runs[0].results[0].kind == SarifKindFail)
+            test.assert(back.runs[0].results[0].level == SarifLevelWarning)
+            test.assert(list.len(back.runs[0].results[0].locations) == 0)
+            test.assert(list.len(back.runs[0].results[0].properties) == 0)
+            test.assert(list.len(back.runs[0].results[0].fingerprints) == 0)
+
+    test.case("an artifact location that names nothing by index or URI")
+    match sarifjson.read_text(physical_doc("\"artifactLocation\":{}"))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].locations[0].physical.artifact.index == -1)
+
+    test.case("the driver's own refusals")
+    test.assert(refuses_at(run_doc("\"tool\":{\"driver\":{\"name\":\"t\",\"rules\":7}}"),
+                           "/runs/0/tool/driver/rules"))
+    test.assert(refuses_at(tool_doc("{\"properties\":7}", "\"results\":[]"),
+                           "/runs/0/tool/driver/rules/0/properties"))
+    test.assert(refuses_at(run_doc("\"tool\":{\"extensions\":7}"),
+                           "/runs/0/tool/extensions"))
+    test.assert(refuses_at(run_doc("\"tool\":{\"extensions\":[{\"rules\":[7]}]}"),
+                           "/runs/0/tool/extensions/0/rules/0"))
+
+    test.case("the URI base table")
+    test.assert(refuses_at(run_doc("\"originalUriBaseIds\":7"),
+                           "/runs/0/originalUriBaseIds"))
+    test.assert(refuses_at(run_doc("\"originalUriBaseIds\":{\"A\":7}"),
+                           "/runs/0/originalUriBaseIds/A"))
+
+    test.case("a logical reference that names the table's first entry")
+    match sarifjson.read_text(location_doc("\"logicalLocations\":[{\"index\":-1}]"))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(back.runs[0].results[0].locations[0].logical.index == -1)
+
+    test.case("the locations inside a result")
+    test.assert(refuses_at(location_doc("\"physicalLocation\":7"),
+                           "/runs/0/results/0/locations/0/physicalLocation"))
+    test.assert(refuses_at(location_doc("\"logicalLocations\":7"),
+                           "/runs/0/results/0/locations/0/logicalLocations"))
+
+    test.case("the parts of a code flow")
+    test.assert(refuses_at(step_doc("\"location\":7"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0/location"))
+    test.assert(refuses_at(step_doc(str.join([
+            "\"location\":{\"physicalLocation\":{\"artifactLocation\":",
+            "{\"index\":9}}}"],
+            "")),
+        "/runs/0/results/0/codeFlows/0/threadFlows/0/locations/0/location/physicalLocation/artifactLocation/index"))
+    test.assert(refuses_at(thread_doc("\"locations\":7"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows/0/locations"))
+    test.assert(refuses_at(flow_doc("\"threadFlows\":7"),
+                           "/runs/0/results/0/codeFlows/0/threadFlows"))
+
+    test.case("the parts of a fix")
+    test.assert(refuses_at(change_doc("\"replacements\":7"),
+                           "/runs/0/results/0/fixes/0/artifactChanges/0/replacements"))
+    test.assert(refuses_at(fix_doc("\"artifactChanges\":7"),
+                           "/runs/0/results/0/fixes/0/artifactChanges"))
+    test.assert(refuses_at(suppression_doc("\"location\":{\"physicalLocation\":7}"),
+                           "/runs/0/results/0/suppressions/0/location/physicalLocation"))
+
+    test.case("a rule identifier that names a rule the tool declares")
+    match sarifjson.read_text(str.join([
+            "{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"t\",",
+            "\"rules\":[{\"id\":\"A\"},{\"id\":\"B\"}]},\"extensions\":[",
+            "{\"name\":\"plug\",\"rules\":[{\"id\":\"P1\"}]},",
+            "{\"name\":\"plug2\",\"rules\":[{\"id\":\"Q1\"},{\"id\":\"Q2\"}]}]},",
+            "\"results\":[{\"ruleId\":\"B\"},{\"ruleId\":\"Q2\"},",
+            "{\"ruleId\":\"P1\"}]}]}"],
+            ""))
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            let run = back.runs[0]
+            test.assert(run.results[0].rule.component == 0)
+            test.assert(run.results[0].rule.index == 1)
+            test.assert(run.results[1].rule.component == 2)
+            test.assert(run.results[1].rule.index == 1)
+            test.assert(run.results[2].rule.component == 1)
+            test.assert(run.results[2].rule.index == 0)
+            match sarifrun.rule_by_id(run, "Q2")
+                None    => test.assert(false)
+                Some(r) => test.assert(r.id == "Q2")
+
+    test.case("a URI the table declares is found rather than declared twice")
+    let with_table = str.join([
+        "{\"version\":\"2.1.0\",\"runs\":[{\"artifacts\":[",
+        "{\"location\":{\"uri\":\"src/a.nv\"}},",
+        "{\"location\":{\"uri\":\"src/b.nv\"}}],\"results\":[",
+        "{\"locations\":[{\"physicalLocation\":{\"artifactLocation\":",
+        "{\"uri\":\"src/a.nv\"}}}]},",
+        "{\"locations\":[{\"physicalLocation\":{\"artifactLocation\":",
+        "{\"uri\":\"src/c.nv\"}}}]}]}]}"],
+        "")
+    match sarifjson.read_text(with_table)
+        Err(_)   => test.assert(false)
+        Ok(back) =>
+            test.assert(list.len(back.runs[0].artifacts) == 3)
+            test.assert(back.runs[0].results[0].locations[0].physical.artifact.index == 0)
+            test.assert(back.runs[0].results[1].locations[0].physical.artifact.index == 2)
+
+    test.case("a region with only a character offset writes no line and column")
+    var cb = sarifbuild.builder("novo", "0.8.9")
+    cb = sarifbuild.add_result(cb, "E1", SarifLevelError, "src/a.nv",
+                               sarifresult.char_region(5, 3), "a character region")
+    let written = sarifjson.write_text(sarifbuild.finish_log(cb))
+    test.assert(str.contains(written, "\"charOffset\":5"))
+    test.assert(not str.contains(written, "startLine"))
+
+    test.case("the last of the run's readers")
+    match sarifjson.read_text(run_doc("\"artifacts\":[{\"location\":{\"uri\":\"\"}}]"))
+        Err(_)   => test.assert(false)
+        Ok(back) => test.assert(list.len(back.runs[0].artifacts) == 1)

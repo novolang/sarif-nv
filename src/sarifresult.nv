@@ -1,7 +1,5 @@
 // sarifresult.nv — one finding, and everywhere it can point.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // A REGION HAS THREE COORDINATE SYSTEMS AND THEY ARE NOT
 // INTERCHANGEABLE.  SARIF § 3.30 lets a region be expressed as a text
 // region (1-based `startLine` / `startColumn`), as a character region
@@ -200,6 +198,42 @@ pub struct SarifReplacement
     deleted_region: SarifRegion
     inserted_text: Str
 
+// ── Private helpers ──────────────────────────────────────────────────
+
+// A level as a number, so "at or above" is a comparison rather than
+// four cases at every call site.  The order is SARIF's own: none, note,
+// warning, error.
+fn level_rank(l: sarifref.SarifLevel) -> Int
+    match l
+        SarifLevelNone    => 0
+        SarifLevelNote    => 1
+        SarifLevelWarning => 2
+        SarifLevelError   => 3
+
+// Whether the list already holds this artifact, by index.
+fn holds_ref(rs: [sarifref.SarifArtifactRef], a: sarifref.SarifArtifactRef) -> Bool
+    for r in rs
+        if r.index == a.index
+            return true
+    false
+
+// Whether an artifact has to be added to the list: it is a real ref —
+// not the absent one — and is not in the list already.
+//
+// A predicate rather than an appending call, because a helper that
+// pushed would need a `var` parameter to write through, and the one
+// caller's list is right here.
+fn arrives_new(rs: [sarifref.SarifArtifactRef], a: sarifref.SarifArtifactRef) -> Bool
+    if a.index < 0
+        return false
+    not holds_ref(rs, a)
+
+// A region with the two text coordinates set and nothing else.
+fn text_only(sl: Int, sc: Int, el: Int, ec: Int) -> SarifRegion
+    SarifRegion { start_line: sl, start_column: sc, end_line: el, end_column: ec,
+                  char_offset: -1, char_length: -1, byte_offset: -1, byte_length: -1,
+                  snippet: "" }
+
 // ── Building the small values ────────────────────────────────────────
 
 // A region with nothing set: the whole artifact.
@@ -211,7 +245,7 @@ pub struct SarifReplacement
 //     println("${sarifresult.region_has_text(sarifresult.whole_artifact())}")
 // ```
 pub fn whole_artifact() -> SarifRegion []
-    todo("sarif-nv.sarifresult.whole_artifact")
+    text_only(0, 0, 0, 0)
 
 // A region from 1-based line and column coordinates.
 //
@@ -226,18 +260,22 @@ pub fn whole_artifact() -> SarifRegion []
 //     println("${r.start_line}")
 // ```
 pub fn text_region(start_line: Int, start_col: Int, end_line: Int, end_col: Int) -> SarifRegion []
-    todo("sarif-nv.sarifresult.text_region")
+    text_only(start_line, start_col, end_line, end_col)
 
 // A region from a 0-based character offset and a length.
 pub fn char_region(offset: Int, length: Int) -> SarifRegion []
-    todo("sarif-nv.sarifresult.char_region")
+    SarifRegion { start_line: 0, start_column: 0, end_line: 0, end_column: 0,
+                  char_offset: offset, char_length: length,
+                  byte_offset: -1, byte_length: -1, snippet: "" }
 
 // A region from a 0-based byte offset and a length.
 //
 // The one a parser has, and the one that must not be written into a
 // character region: see the module header.
 pub fn byte_region(offset: Int, length: Int) -> SarifRegion []
-    todo("sarif-nv.sarifresult.byte_region")
+    SarifRegion { start_line: 0, start_column: 0, end_line: 0, end_column: 0,
+                  char_offset: -1, char_length: -1,
+                  byte_offset: offset, byte_length: length, snippet: "" }
 
 // A region from a half-open byte span, as every scanner in this project
 // answers one.
@@ -246,28 +284,32 @@ pub fn byte_region(offset: Int, length: Int) -> SarifRegion []
 // Published because the conversion is one subtraction and the place
 // off-by-ones live.
 pub fn region_from_span(start: Int, end: Int) -> SarifRegion []
-    todo("sarif-nv.sarifresult.region_from_span")
+    byte_region(start, end - start)
 
 // A region with a snippet attached.
 pub fn with_snippet(r: SarifRegion, snippet: Str) -> SarifRegion []
-    todo("sarif-nv.sarifresult.with_snippet")
+    SarifRegion { start_line: r.start_line, start_column: r.start_column,
+                  end_line: r.end_line, end_column: r.end_column,
+                  char_offset: r.char_offset, char_length: r.char_length,
+                  byte_offset: r.byte_offset, byte_length: r.byte_length,
+                  snippet: snippet }
 
 // Whether a region carries 1-based line and column coordinates.
 pub fn region_has_text(r: SarifRegion) -> Bool []
-    todo("sarif-nv.sarifresult.region_has_text")
+    r.start_line > 0
 
 // Whether a region carries a character offset.
 pub fn region_has_chars(r: SarifRegion) -> Bool []
-    todo("sarif-nv.sarifresult.region_has_chars")
+    r.char_offset >= 0
 
 // Whether a region carries a byte offset.
 pub fn region_has_bytes(r: SarifRegion) -> Bool []
-    todo("sarif-nv.sarifresult.region_has_bytes")
+    r.byte_offset >= 0
 
 // Whether a region says nothing, and therefore means the whole
 // artifact.
 pub fn region_is_whole(r: SarifRegion) -> Bool []
-    todo("sarif-nv.sarifresult.region_is_whole")
+    not region_has_text(r) and not region_has_chars(r) and not region_has_bytes(r)
 
 // Whether two regions are the same range in the same coordinates.
 //
@@ -275,29 +317,46 @@ pub fn region_is_whole(r: SarifRegion) -> Bool []
 // the same characters are not equal — because this package cannot know
 // they are, having never seen the file.
 pub fn region_eq(a: SarifRegion, b: SarifRegion) -> Bool []
-    todo("sarif-nv.sarifresult.region_eq")
+    a.start_line == b.start_line and a.start_column == b.start_column
+        and a.end_line == b.end_line and a.end_column == b.end_column
+        and a.char_offset == b.char_offset and a.char_length == b.char_length
+        and a.byte_offset == b.byte_offset and a.byte_length == b.byte_length
 
 // A location in one artifact, at one region.
 pub fn location(a: sarifref.SarifArtifactRef, r: SarifRegion) -> SarifLocation []
-    todo("sarif-nv.sarifresult.location")
+    // The refs are built UNQUALIFIED — `SarifLogicalRef` and not
+    // `sarifref.SarifLogicalRef`.  A module-qualified struct literal is
+    // a parse error (E1002), although the same qualified name is
+    // accepted in type position and `use` brings the bare name into
+    // scope; the filing is
+    // `language/a-qualified-struct-literal-is-a-parse-error`.
+    SarifLocation { physical: SarifPhysical { artifact: a, region: r,
+                                              context_region: whole_artifact() },
+                    logical: SarifLogicalRef { index: -1 }, message: "" }
 
 // A location with a sentence of its own.
 pub fn location_with_message(a: sarifref.SarifArtifactRef, r: SarifRegion,
                              message: Str) -> SarifLocation []
-    todo("sarif-nv.sarifresult.location_with_message")
+    SarifLocation { physical: SarifPhysical { artifact: a, region: r,
+                                              context_region: whole_artifact() },
+                    logical: SarifLogicalRef { index: -1 },
+                    message: message }
 
 // A location that names a program element rather than a place in a
 // file.
 pub fn logical_location(l: sarifref.SarifLogicalRef) -> SarifLocation []
-    todo("sarif-nv.sarifresult.logical_location")
+    SarifLocation { physical: SarifPhysical { artifact: sarifref.no_artifact(),
+                                              region: whole_artifact(),
+                                              context_region: whole_artifact() },
+                    logical: l, message: "" }
 
 // The baseline field for a run that was not compared to a baseline.
 pub fn no_baseline() -> SarifBaselineField []
-    todo("sarif-nv.sarifresult.no_baseline")
+    SarifBaselineField { present: false, state: SarifBaselineNew }
 
 // The baseline field for a state the tool determined.
 pub fn baseline(state: sarifref.SarifBaseline) -> SarifBaselineField []
-    todo("sarif-nv.sarifresult.baseline")
+    SarifBaselineField { present: true, state: state }
 
 // ── Reading a result ─────────────────────────────────────────────────
 
@@ -307,7 +366,9 @@ pub fn baseline(state: sarifref.SarifBaseline) -> SarifBaselineField []
 // whole — and this is how a consumer that only handles the common case
 // says so.
 pub fn primary_location(r: SarifResult) -> ?SarifLocation []
-    todo("sarif-nv.sarifresult.primary_location")
+    if list.len(r.locations) == 0
+        return None
+    Some(r.locations[0])
 
 // Whether a result is being reported: it has no suppression whose
 // status is accepted.
@@ -316,7 +377,10 @@ pub fn primary_location(r: SarifResult) -> ?SarifLocation []
 // `suppressions == []`: a suppression somebody requested and nobody
 // approved leaves the finding in force.
 pub fn is_reported(r: SarifResult) -> Bool []
-    todo("sarif-nv.sarifresult.is_reported")
+    for s in r.suppressions
+        if s.status == SarifSuppressionAccepted
+            return false
+    true
 
 // Whether a result would fail a build under the usual gate: reported,
 // kind `fail`, and level at or above `min`.
@@ -324,17 +388,32 @@ pub fn is_reported(r: SarifResult) -> Bool []
 // One call because the three-part condition is where a pipeline's own
 // logic silently disagrees with the next pipeline's.
 pub fn fails_at(r: SarifResult, min: sarifref.SarifLevel) -> Bool []
-    todo("sarif-nv.sarifresult.fails_at")
+    is_reported(r) and r.kind == SarifKindFail
+        and level_rank(r.level) >= level_rank(min)
 
 // A fingerprint's value by name, or the empty string.
 pub fn fingerprint(r: SarifResult, name: Str) -> Str []
-    todo("sarif-nv.sarifresult.fingerprint")
+    for f in r.fingerprints
+        if f.name == name
+            return f.value
+    ""
 
 // How many artifacts a result and its fixes touch, counted once each.
 //
 // What a consumer sizes a checkout against before applying a fix.
 pub fn touched_artifacts(r: SarifResult) -> [sarifref.SarifArtifactRef] []
-    todo("sarif-nv.sarifresult.touched_artifacts")
+    var out: [sarifref.SarifArtifactRef] = []
+    for l in r.locations
+        if arrives_new(out, l.physical.artifact)
+            list.push(out, l.physical.artifact)
+    for l in r.related_locations
+        if arrives_new(out, l.physical.artifact)
+            list.push(out, l.physical.artifact)
+    for f in r.fixes
+        for c in f.changes
+            if arrives_new(out, c.artifact)
+                list.push(out, c.artifact)
+    out
 
 // Whether every replacement of every fix is inside a region that says
 // where it is.
@@ -343,4 +422,9 @@ pub fn touched_artifacts(r: SarifResult) -> [sarifref.SarifArtifactRef] []
 // which is a thing tools have shipped.  `sarifjson.problems` reports it; this
 // is the predicate it reports on.
 pub fn fixes_are_bounded(r: SarifResult) -> Bool []
-    todo("sarif-nv.sarifresult.fixes_are_bounded")
+    for f in r.fixes
+        for c in f.changes
+            for rep in c.replacements
+                if region_is_whole(rep.deleted_region)
+                    return false
+    true

@@ -1,0 +1,28 @@
+// hostile_tests.nv — logs with indices as large as an Int allows, with
+// nesting far deeper than a log is, and with very many results.
+
+use std.test
+use sarifjson
+
+fn settled(text: Str) -> Bool
+    match sarifjson.read_text(text)
+        Ok(_)  => true
+        Err(_) => true
+
+fn log_of(results: Str) -> Str
+    "{\"version\": \"2.1.0\", \"runs\": [{\"tool\": {\"driver\": {\"name\": \"t\", \"rules\": [{\"id\": \"r\"}]}}, \"results\": [" + results + "]}]}"
+
+@test
+fn test_indices_at_the_limit_of_an_int_are_handled() [io]
+    test.assert(settled(log_of("{\"ruleId\": \"r\", \"ruleIndex\": 9223372036854775807, \"message\": {\"text\": \"m\"}}")))
+    test.assert(settled(log_of("{\"ruleId\": \"r\", \"ruleIndex\": -9223372036854775808, \"message\": {\"text\": \"m\"}}")))
+    test.assert(settled(log_of("{\"ruleId\": \"r\", \"ruleIndex\": 1e300, \"message\": {\"text\": \"m\"}}")))
+    test.assert(settled(log_of("{\"message\": {\"text\": \"m\"}, \"locations\": [{\"physicalLocation\": {\"artifactLocation\": {\"index\": 9223372036854775807}, \"region\": {\"startLine\": 9223372036854775807, \"endLine\": -9223372036854775808, \"startColumn\": 1e300, \"charOffset\": 9223372036854775807, \"charLength\": 9223372036854775807}}}]}")))
+
+@test
+fn test_deep_properties_are_bounded() [io]
+    test.assert(settled(log_of("{\"message\": {\"text\": \"m\"}, \"properties\": {\"x\": " + "[".repeat(15000) + "]".repeat(15000) + "}}")))
+
+@test
+fn test_many_results_are_read_in_bounded_time() [io]
+    test.assert(settled(log_of("{\"ruleId\": \"r\", \"ruleIndex\": 0, \"message\": {\"text\": \"m\"}},".repeat(20000) + "{\"message\": {\"text\": \"m\"}}")))

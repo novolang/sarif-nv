@@ -1,7 +1,5 @@
 // sarifbuild.nv — the builder, and the only place an index is minted.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // THE CALL THIS MODULE EXISTS FOR is one line long:
 //
 //     b = sarifbuild.add_result(b, "E2004", SarifLevelError,
@@ -55,6 +53,200 @@ pub struct SarifBuilder
     uri_base_ids: [sarifrun.SarifUriBase]
     properties: [sarifref.SarifProperty]
 
+// ── Private helpers ──────────────────────────────────────────────────
+
+// The position a URI occupies in an artifact table, or -1.  Two
+// artifacts are one only when the URI and the base are both the same,
+// because `a.nv` under two bases is two files.
+fn find_artifact(arts: [sarifrun.SarifArtifact], uri: Str, base: Str) -> Int
+    var i = 0
+    while i < list.len(arts)
+        let a = arts[i]
+        if a.uri == uri and a.uri_base_id == base
+            return i
+        i = i + 1
+    -1
+
+// The same table with one artifact appended.  A copy, not a write:
+// `arts` arrives through a plain parameter, and E2038 is what a write
+// through one is refused by.
+fn with_artifact(arts: [sarifrun.SarifArtifact],
+                 a: sarifrun.SarifArtifact) -> [sarifrun.SarifArtifact]
+    var out = arts[:]
+    list.push(out, a)
+    out
+
+// The position a URI base occupies in a base table, or -1.
+fn find_uri_base(bases: [sarifrun.SarifUriBase], id: Str) -> Int
+    var i = 0
+    while i < list.len(bases)
+        if bases[i].id == id
+            return i
+        i = i + 1
+    -1
+
+// The position a logical location occupies in a logical table, or -1.
+//
+// Two logical locations are one when the fully-qualified name, the kind
+// and the parent all match — the identity of a program element, which
+// is what keeps a finding in `parse` from filling the table once per
+// finding.
+fn find_logical(logs: [sarifrun.SarifLogicalLocation], l: sarifrun.SarifLogicalLocation) -> Int
+    var i = 0
+    while i < list.len(logs)
+        let other = logs[i]
+        if other.fully_qualified_name == l.fully_qualified_name
+            and other.kind == l.kind and other.parent_index == l.parent_index
+            return i
+        i = i + 1
+    -1
+
+// The position a rule identifier occupies in a rule table, or -1.
+fn rule_index(rules: [sarifrun.SarifRule], id: Str) -> Int
+    var i = 0
+    while i < list.len(rules)
+        let rule = rules[i]
+        if rule.id == id
+            return i
+        i = i + 1
+    -1
+
+// The rule table with `r` replacing the rule of its identifier, or with
+// `r` appended when the identifier is new.
+fn with_rule(rules: [sarifrun.SarifRule], r: sarifrun.SarifRule) -> [sarifrun.SarifRule]
+    var out = rules[:]
+    let at = rule_index(rules, r.id)
+    if at < 0
+        list.push(out, r)
+        return out
+    out[at] = r
+    out
+
+// A rule a diagnostic named but the tool never declared: the identifier
+// stands in for the readable name, and the default level is the one
+// SARIF's own default reporting configuration uses.
+fn mentioned_rule(id: Str) -> sarifrun.SarifRule
+    SarifRule { id: id, name: id, short_description: "", full_description: "",
+                default_level: SarifLevelWarning, help_uri: "", properties: [] }
+
+// A driver with its descriptions, and a different rule table.
+fn driver_like(d: sarifrun.SarifDriver, rules: [sarifrun.SarifRule]) -> sarifrun.SarifDriver
+    SarifDriver { name: d.name, version: d.version, semantic_version: d.semantic_version,
+                  information_uri: d.information_uri, rules: rules }
+
+// The builder with a different tool and every table it already had.
+fn with_tool(b: SarifBuilder, t: sarifrun.SarifTool) -> SarifBuilder
+    SarifBuilder { tool: t, artifacts: b.artifacts,
+                   logical_locations: b.logical_locations, results: b.results,
+                   invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+                   properties: b.properties }
+
+// The builder with a different artifact table and every other table.
+fn with_artifacts(b: SarifBuilder, arts: [sarifrun.SarifArtifact]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: arts,
+                   logical_locations: b.logical_locations, results: b.results,
+                   invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+                   properties: b.properties }
+
+// The builder with a different logical table and every other table.
+fn with_logicals(b: SarifBuilder, logs: [sarifrun.SarifLogicalLocation]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: b.artifacts,
+                   logical_locations: logs, results: b.results,
+                   invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+                   properties: b.properties }
+
+// The builder with a different base table and every other table.
+fn with_uri_bases(b: SarifBuilder, bases: [sarifrun.SarifUriBase]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: b.artifacts,
+                   logical_locations: b.logical_locations, results: b.results,
+                   invocations: b.invocations, uri_base_ids: bases,
+                   properties: b.properties }
+
+// The builder with a different invocation list and every other table.
+fn with_invocations(b: SarifBuilder, invs: [sarifrun.SarifInvocation]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: b.artifacts,
+                   logical_locations: b.logical_locations, results: b.results,
+                   invocations: invs, uri_base_ids: b.uri_base_ids,
+                   properties: b.properties }
+
+// The builder with a different property bag and every other table.
+fn with_properties(b: SarifBuilder, props: [sarifref.SarifProperty]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: b.artifacts,
+                   logical_locations: b.logical_locations, results: b.results,
+                   invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+                   properties: props }
+
+// The builder with a different result list and every other table.
+fn with_results(b: SarifBuilder, rs: [sarifresult.SarifResult]) -> SarifBuilder
+    SarifBuilder { tool: b.tool, artifacts: b.artifacts,
+                   logical_locations: b.logical_locations, results: rs,
+                   invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+                   properties: b.properties }
+
+// The result list with `r` at `at`, as a copy.
+fn results_replaced(rs: [sarifresult.SarifResult], at: Int,
+                    r: sarifresult.SarifResult) -> [sarifresult.SarifResult]
+    var out = rs[:]
+    out[at] = r
+    out
+
+// The last result, or `None` when the builder has none.
+//
+// `SarifResult` is a struct of fourteen fields and only one of the
+// four attaching calls changes one of them, so the copy happens once,
+// here, per call.
+fn last_result(b: SarifBuilder) -> ?sarifresult.SarifResult
+    if list.len(b.results) == 0
+        return None
+    Some(b.results[list.len(b.results) - 1])
+
+// A result with a different fix list.
+fn result_with_fixes(r: sarifresult.SarifResult,
+                     fixes: [sarifresult.SarifFix]) -> sarifresult.SarifResult
+    SarifResult { rule: r.rule, rule_id: r.rule_id, kind: r.kind, level: r.level,
+                  message: r.message, message_markdown: r.message_markdown,
+                  locations: r.locations, related_locations: r.related_locations,
+                  code_flows: r.code_flows, fixes: fixes, suppressions: r.suppressions,
+                  baseline: r.baseline, fingerprints: r.fingerprints,
+                  properties: r.properties }
+
+// A result with a different fingerprint list.
+fn result_with_fingerprints(r: sarifresult.SarifResult,
+                            fps: [sarifresult.SarifFingerprint]) -> sarifresult.SarifResult
+    SarifResult { rule: r.rule, rule_id: r.rule_id, kind: r.kind, level: r.level,
+                  message: r.message, message_markdown: r.message_markdown,
+                  locations: r.locations, related_locations: r.related_locations,
+                  code_flows: r.code_flows, fixes: r.fixes, suppressions: r.suppressions,
+                  baseline: r.baseline, fingerprints: fps, properties: r.properties }
+
+// A result with a different baseline field.
+fn result_with_baseline(r: sarifresult.SarifResult,
+                        bl: sarifresult.SarifBaselineField) -> sarifresult.SarifResult
+    SarifResult { rule: r.rule, rule_id: r.rule_id, kind: r.kind, level: r.level,
+                  message: r.message, message_markdown: r.message_markdown,
+                  locations: r.locations, related_locations: r.related_locations,
+                  code_flows: r.code_flows, fixes: r.fixes, suppressions: r.suppressions,
+                  baseline: bl, fingerprints: r.fingerprints, properties: r.properties }
+
+// A result with a different suppression list.
+fn result_with_suppressions(r: sarifresult.SarifResult,
+                            ss: [sarifresult.SarifSuppression]) -> sarifresult.SarifResult
+    SarifResult { rule: r.rule, rule_id: r.rule_id, kind: r.kind, level: r.level,
+                  message: r.message, message_markdown: r.message_markdown,
+                  locations: r.locations, related_locations: r.related_locations,
+                  code_flows: r.code_flows, fixes: r.fixes, suppressions: ss,
+                  baseline: r.baseline, fingerprints: r.fingerprints,
+                  properties: r.properties }
+
+// A driver list with one entry replaced.
+fn extension_replaced(exts: [sarifrun.SarifDriver], at: Int,
+                      d: sarifrun.SarifDriver) -> [sarifrun.SarifDriver]
+    var out = exts[:]
+    out[at] = d
+    out
+
+// ── The builder ──────────────────────────────────────────────────────
+
 // A builder for a tool with a name and a version.
 //
 // ```novo
@@ -65,7 +257,7 @@ pub struct SarifBuilder
 //     println(b.tool.driver.name)
 // ```
 pub fn builder(tool_name: Str, version: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.builder")
+    builder_with(tool_name, version, "", "")
 
 // A builder whose driver also carries a documentation URI and a
 // semantic version.
@@ -76,7 +268,12 @@ pub fn builder(tool_name: Str, version: Str) -> SarifBuilder []
 // documentation URI and no name.
 pub fn builder_with(tool_name: Str, version: Str, semantic_version: Str,
                     information_uri: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.builder_with")
+    let driver = SarifDriver { name: tool_name, version: version,
+                               semantic_version: semantic_version,
+                               information_uri: information_uri, rules: [] }
+    SarifBuilder { tool: SarifTool { driver: driver, extensions: [] },
+                   artifacts: [], logical_locations: [], results: [], invocations: [],
+                   uri_base_ids: [], properties: [] }
 
 // ── Interning ────────────────────────────────────────────────────────
 
@@ -104,7 +301,7 @@ pub fn builder_with(tool_name: Str, version: Str, semantic_version: Str,
 //     println("${p.1.index}")
 // ```
 pub fn artifact(b: SarifBuilder, uri: Str) -> (SarifBuilder, sarifref.SarifArtifactRef) []
-    todo("sarif-nv.sarifbuild.artifact")
+    artifact_under(b, uri, "")
 
 // The ref for a URI relative to a named base, adding it if it is new.
 //
@@ -112,7 +309,13 @@ pub fn artifact(b: SarifBuilder, uri: Str) -> (SarifBuilder, sarifref.SarifArtif
 // artifacts, because they are two files.
 pub fn artifact_under(b: SarifBuilder, uri: Str,
                       uri_base_id: Str) -> (SarifBuilder, sarifref.SarifArtifactRef) []
-    todo("sarif-nv.sarifbuild.artifact_under")
+    let at = find_artifact(b.artifacts, uri, uri_base_id)
+    if at >= 0
+        return (b, SarifArtifactRef { index: at })
+    let art = SarifArtifact { uri: uri, uri_base_id: uri_base_id, mime_type: "",
+                              length: -1, roles: [] }
+    (with_artifacts(b, with_artifact(b.artifacts, art)),
+     SarifArtifactRef { index: list.len(b.artifacts) })
 
 // The ref for a rule of the driver, adding it if it is new.
 //
@@ -121,7 +324,10 @@ pub fn artifact_under(b: SarifBuilder, uri: Str,
 // in a diagnostic should not have the help text overwritten by the
 // mention.  `set_rule` is the call that replaces, and it says so.
 pub fn rule(b: SarifBuilder, id: Str) -> (SarifBuilder, sarifref.SarifRuleRef) []
-    todo("sarif-nv.sarifbuild.rule")
+    let at = rule_index(b.tool.driver.rules, id)
+    if at >= 0
+        return (b, SarifRuleRef { component: 0, index: at })
+    set_rule(b, mentioned_rule(id))
 
 // Declare a rule with its descriptions, replacing any rule of the same
 // identifier.
@@ -129,7 +335,14 @@ pub fn rule(b: SarifBuilder, id: Str) -> (SarifBuilder, sarifref.SarifRuleRef) [
 // What a tool calls once per rule at startup, from its own diagnostic
 // registry.
 pub fn set_rule(b: SarifBuilder, r: sarifrun.SarifRule) -> (SarifBuilder, sarifref.SarifRuleRef) []
-    todo("sarif-nv.sarifbuild.set_rule")
+    let was = rule_index(b.tool.driver.rules, r.id)
+    let rules = with_rule(b.tool.driver.rules, r)
+    var at = was
+    if at < 0
+        at = list.len(b.tool.driver.rules)
+    let driver = driver_like(b.tool.driver, rules)
+    let tool = SarifTool { driver: driver, extensions: b.tool.extensions }
+    (with_tool(b, tool), SarifRuleRef { component: 0, index: at })
 
 // Add a tool component — a plugin, a rule pack — and answer its
 // number.
@@ -137,7 +350,11 @@ pub fn set_rule(b: SarifBuilder, r: sarifrun.SarifRule) -> (SarifBuilder, sarifr
 // The number is what `SarifRuleRef.component` carries, and
 // `rule_of_component` is how a rule goes into it.
 pub fn extension(b: SarifBuilder, d: sarifrun.SarifDriver) -> (SarifBuilder, Int) []
-    todo("sarif-nv.sarifbuild.extension")
+    var exts = b.tool.extensions[:]
+    list.push(exts, d)
+    let number = list.len(b.tool.extensions) + 1
+    let tool = SarifTool { driver: b.tool.driver, extensions: exts }
+    (with_tool(b, tool), number)
 
 // The ref for a rule of one component, adding it if it is new.
 //
@@ -148,16 +365,44 @@ pub fn extension(b: SarifBuilder, d: sarifrun.SarifDriver) -> (SarifBuilder, Int
 // `sarifjson.run_problems` reports it.
 pub fn rule_of_component(b: SarifBuilder, component: Int,
                          id: Str) -> (SarifBuilder, sarifref.SarifRuleRef) []
-    todo("sarif-nv.sarifbuild.rule_of_component")
+    if component == 0
+        return rule(b, id)
+    let at = component - 1
+    if at < 0 or at >= list.len(b.tool.extensions)
+        return (b, sarifref.no_rule())
+    let ext = b.tool.extensions[at]
+    let was = rule_index(ext.rules, id)
+    if was >= 0
+        return (b, SarifRuleRef { component: component, index: was })
+    let rules = with_rule(ext.rules, mentioned_rule(id))
+    let changed = driver_like(ext, rules)
+    let exts = extension_replaced(b.tool.extensions, at, changed)
+    let tool = SarifTool { driver: b.tool.driver, extensions: exts }
+    (with_tool(b, tool), SarifRuleRef { component: component, index: list.len(ext.rules) })
 
 // The ref for a logical location, adding it if it is new.
+//
+// Two logical locations are one when the fully-qualified name, the kind
+// and the parent all match — see `find_logical`.
 pub fn logical(b: SarifBuilder,
                l: sarifrun.SarifLogicalLocation) -> (SarifBuilder, sarifref.SarifLogicalRef) []
-    todo("sarif-nv.sarifbuild.logical")
+    let at = find_logical(b.logical_locations, l)
+    if at >= 0
+        return (b, SarifLogicalRef { index: at })
+    var all = b.logical_locations[:]
+    list.push(all, l)
+    (with_logicals(b, all), SarifLogicalRef { index: list.len(b.logical_locations) })
 
 // Declare where a named base of relative URIs points.
 pub fn uri_base(b: SarifBuilder, id: Str, uri: Str, description: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.uri_base")
+    let base = SarifUriBase { id: id, uri: uri, description: description }
+    var out = b.uri_base_ids[:]
+    let at = find_uri_base(b.uri_base_ids, id)
+    if at >= 0
+        out[at] = base
+    else
+        list.push(out, base)
+    with_uri_bases(b, out)
 
 // ── Adding results ───────────────────────────────────────────────────
 
@@ -169,6 +414,7 @@ pub fn uri_base(b: SarifBuilder, id: Str, uri: Str, description: Str) -> SarifBu
 //
 // ```novo
 // use sarifbuild
+// use sarifref
 // use sarifresult
 //
 // fn main() [io]
@@ -180,7 +426,7 @@ pub fn uri_base(b: SarifBuilder, id: Str, uri: Str, description: Str) -> SarifBu
 // ```
 pub fn add_result(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel, file: Str,
                   region: sarifresult.SarifRegion, message: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.add_result")
+    add_result_kind(b, rule_id, SarifKindFail, level, file, region, message)
 
 // One result of a kind other than `fail`.
 //
@@ -190,7 +436,17 @@ pub fn add_result(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel, fil
 pub fn add_result_kind(b: SarifBuilder, rule_id: Str, kind: sarifref.SarifKind,
                        level: sarifref.SarifLevel, file: Str, region: sarifresult.SarifRegion,
                        message: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.add_result_kind")
+    let named = rule(b, rule_id)
+    let placed = artifact(named.0, file)
+    let where_at = sarifresult.location(placed.1, region)
+    let res = SarifResult { rule: named.1, rule_id: rule_id, kind: kind,
+                            level: sarifref.level_for_kind(kind, level),
+                            message: message, message_markdown: "",
+                            locations: [where_at], related_locations: [], code_flows: [],
+                            fixes: [], suppressions: [],
+                            baseline: sarifresult.no_baseline(),
+                            fingerprints: [], properties: [] }
+    add(placed.0, res)
 
 // A result the caller assembled itself.
 //
@@ -199,12 +455,20 @@ pub fn add_result_kind(b: SarifBuilder, rule_id: Str, kind: sarifref.SarifKind,
 // from this builder; `sarifjson.result_problems` is what says so if
 // they did not.
 pub fn add(b: SarifBuilder, r: sarifresult.SarifResult) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.add")
+    var out = b.results[:]
+    list.push(out, r)
+    with_results(b, out)
 
 // A result with no location at all: a finding about the project.
 pub fn add_global(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel,
                   message: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.add_global")
+    let named = rule(b, rule_id)
+    let res = SarifResult { rule: named.1, rule_id: rule_id, kind: SarifKindFail,
+                            level: level, message: message, message_markdown: "",
+                            locations: [], related_locations: [], code_flows: [], fixes: [],
+                            suppressions: [], baseline: sarifresult.no_baseline(),
+                            fingerprints: [], properties: [] }
+    add(named.0, res)
 
 // Attach a fix to the result added last.
 //
@@ -212,19 +476,38 @@ pub fn add_global(b: SarifBuilder, rule_id: Str, level: sarifref.SarifLevel,
 // the diagnostic and an index would be a number it has to carry.  A
 // builder with no results answers itself unchanged.
 pub fn with_fix(b: SarifBuilder, f: sarifresult.SarifFix) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.with_fix")
+    let found = last_result(b)
+    let Some(r) = found else return b
+    var fixes = r.fixes[:]
+    list.push(fixes, f)
+    let at = list.len(b.results) - 1
+    with_results(b, results_replaced(b.results, at, result_with_fixes(r, fixes)))
 
 // Attach a fingerprint to the result added last.
 pub fn with_fingerprint(b: SarifBuilder, name: Str, value: Str) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.with_fingerprint")
+    let found = last_result(b)
+    let Some(r) = found else return b
+    var fps = r.fingerprints[:]
+    list.push(fps, SarifFingerprint { name: name, value: value })
+    let at = list.len(b.results) - 1
+    with_results(b, results_replaced(b.results, at, result_with_fingerprints(r, fps)))
 
 // Attach a baseline state to the result added last.
 pub fn with_baseline(b: SarifBuilder, state: sarifref.SarifBaseline) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.with_baseline")
+    let found = last_result(b)
+    let Some(r) = found else return b
+    let state_field = sarifresult.baseline(state)
+    let at = list.len(b.results) - 1
+    with_results(b, results_replaced(b.results, at, result_with_baseline(r, state_field)))
 
 // Attach a suppression to the result added last.
 pub fn with_suppression(b: SarifBuilder, s: sarifresult.SarifSuppression) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.with_suppression")
+    let found = last_result(b)
+    let Some(r) = found else return b
+    var ss = r.suppressions[:]
+    list.push(ss, s)
+    let at = list.len(b.results) - 1
+    with_results(b, results_replaced(b.results, at, result_with_suppressions(r, ss)))
 
 // ── Finishing ────────────────────────────────────────────────────────
 
@@ -233,26 +516,245 @@ pub fn with_suppression(b: SarifBuilder, s: sarifresult.SarifSuppression) -> Sar
 // The timestamps are the caller's, in RFC 3339 UTC; a `core` package
 // has no clock.  `sarifrun.timestamp_ok` is the check.
 pub fn invocation(b: SarifBuilder, i: sarifrun.SarifInvocation) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.invocation")
+    var out = b.invocations[:]
+    list.push(out, i)
+    with_invocations(b, out)
 
 // Set a property on the run.
 pub fn set_property(b: SarifBuilder, name: Str, value: JsonValueH) -> SarifBuilder []
-    todo("sarif-nv.sarifbuild.set_property")
+    with_properties(b, sarifref.with_property(b.properties, name, value))
 
 // The run.
 pub fn finish(b: SarifBuilder) -> sarifrun.SarifRun []
-    todo("sarif-nv.sarifbuild.finish")
+    SarifRun { tool: b.tool, artifacts: b.artifacts,
+               logical_locations: b.logical_locations, results: b.results,
+               invocations: b.invocations, uri_base_ids: b.uri_base_ids,
+               properties: b.properties }
 
 // The run, wrapped in a log of one run.
 //
 // What a tool writing a `.sarif` file calls, and the reason `finish`
 // exists separately is a job producing several runs into one log.
 pub fn finish_log(b: SarifBuilder) -> sarifrun.SarifLog []
-    todo("sarif-nv.sarifbuild.finish_log")
+    log_of([finish(b)])
 
 // A log from several runs.
 pub fn log_of(runs: [sarifrun.SarifRun]) -> sarifrun.SarifLog []
-    todo("sarif-nv.sarifbuild.log_of")
+    SarifLog { version: sarifrun.sarif_version(), schema: sarifrun.schema_uri(),
+               runs: runs[:] }
+
+// ── Private helpers for merging ──────────────────────────────────────
+//
+// Here rather than up top because they call the interning calls above.
+
+// The tool of a run being merged into, with anything it did not say
+// taken from the run coming in.  `a`'s own facts win.
+fn merge_tool(b: SarifBuilder, t: sarifrun.SarifTool) -> SarifBuilder
+    let mine = b.tool.driver
+    let theirs = t.driver
+    var name = mine.name
+    if name == ""
+        name = theirs.name
+    var version = mine.version
+    if version == ""
+        version = theirs.version
+    var semantic = mine.semantic_version
+    if semantic == ""
+        semantic = theirs.semantic_version
+    var information = mine.information_uri
+    if information == ""
+        information = theirs.information_uri
+    let driver = SarifDriver { name: name, version: version, semantic_version: semantic,
+                               information_uri: information, rules: mine.rules }
+    with_tool(b, SarifTool { driver: driver, extensions: b.tool.extensions })
+
+// Every artifact of `b`, interned into the merged run, with the index
+// each one landed at.
+//
+// An artifact the merged run already has is not added again and the
+// first declaration wins — which is `a`'s, and is why a merge is not a
+// rewrite of what `a` said about its own files.
+fn intern_artifacts(b: SarifBuilder, arts: [sarifrun.SarifArtifact]) -> (SarifBuilder, [Int]) []
+    var bld = b
+    var map: [Int] = []
+    for art in arts
+        let at = find_artifact(bld.artifacts, art.uri, art.uri_base_id)
+        if at >= 0
+            map = list.push(map, at)
+            continue
+        let at_new = list.len(bld.artifacts)
+        bld = with_artifacts(bld, with_artifact(bld.artifacts, art))
+        map = list.push(map, at_new)
+    (bld, map)
+
+// Every logical location of `b`, interned into the merged run, with the
+// index each one landed at.
+//
+// Two passes, because a logical location's parent is an index and a
+// forward reference has no target yet in the first pass.  The second
+// repairs those, which is why a parent is placed as -1 first and
+// corrected after.
+fn intern_logicals(b: SarifBuilder, ls: [sarifrun.SarifLogicalLocation]) -> (SarifBuilder, [Int]) []
+    var bld = b
+    var map: [Int] = []
+    for l in ls
+        var parent = -1
+        if l.parent_index >= 0 and l.parent_index < list.len(map)
+            parent = map[l.parent_index]
+        let placed = logical(bld, SarifLogicalLocation { name: l.name,
+                                                          fully_qualified_name: l.fully_qualified_name,
+                                                          kind: l.kind,
+                                                          parent_index: parent })
+        bld = placed.0
+        map = list.push(map, placed.1.index)
+    for i in 0..list.len(ls)
+        let l = ls[i]
+        if l.parent_index >= 0 and l.parent_index < list.len(map)
+            bld = with_logical_parent(bld, map[i], map[l.parent_index])
+    (bld, map)
+
+// The merged logical table with one entry's parent set.
+fn with_logical_parent(b: SarifBuilder, at: Int, parent: Int) -> SarifBuilder
+    if at < 0 or at >= list.len(b.logical_locations)
+        // cov: skip — the one caller is `intern_logicals`, which passes an
+        // index the same builder just answered from `logical`, so `at` is
+        // always inside the table; this is the guard for a caller that is
+        // not here.
+        return b
+    let l = b.logical_locations[at]
+    if l.parent_index == parent
+        return b
+    var all = b.logical_locations[:]
+    all[at] = SarifLogicalLocation { name: l.name,
+                                     fully_qualified_name: l.fully_qualified_name,
+                                     kind: l.kind, parent_index: parent }
+    with_logicals(b, all)
+
+// Every rule of `b`'s tool, interned into the merged run.
+//
+// The answer is one map per component of `b`: index 0 the driver, then
+// one entry per extension, each holding the merged ref of every rule of
+// that component in order.  `remap_rule` is what reads it.
+//
+// A driver rule of `b` whose identifier `a` already declared becomes
+// `a`'s rule — the same precedence `rule` uses.  An extension of `b` is
+// appended whole, component and all, because two plugins of the same
+// name are not necessarily the same plugin at the same version and
+// merging them would silently pick one.
+fn intern_rules(b: SarifBuilder,
+                t: sarifrun.SarifTool) -> (SarifBuilder, [[sarifref.SarifRuleRef]]) []
+    var bld = b
+    var maps: [[sarifref.SarifRuleRef]] = []
+    var driver_map: [sarifref.SarifRuleRef] = []
+    for decl in t.driver.rules
+        let was = rule_index(bld.tool.driver.rules, decl.id)
+        if was >= 0
+            driver_map = list.push(driver_map, SarifRuleRef { component: 0, index: was })
+            continue
+        let placed = set_rule(bld, decl)
+        bld = placed.0
+        driver_map = list.push(driver_map, placed.1)
+    maps = list.push(maps, driver_map)
+    for ext in t.extensions
+        let added = extension(bld, ext)
+        bld = added.0
+        var ext_map: [sarifref.SarifRuleRef] = list.map(list.range(0, list.len(ext.rules)), i => SarifRuleRef { component: added.1, index: i })
+        maps = list.push(maps, ext_map)
+    (bld, maps)
+
+// An artifact ref of `b` as a ref of the merged run.
+//
+// A ref the map does not cover — one that was already absent, or one
+// pointing past the end of `b`'s own table — becomes the absent ref,
+// which is the only honest answer.
+fn remap_artifact(a: sarifref.SarifArtifactRef, map: [Int]) -> sarifref.SarifArtifactRef
+    if a.index < 0 or a.index >= list.len(map)
+        return sarifref.no_artifact()
+    SarifArtifactRef { index: map[a.index] }
+
+// A logical ref of `b` as a ref of the merged run.
+fn remap_logical(l: sarifref.SarifLogicalRef, map: [Int]) -> sarifref.SarifLogicalRef
+    if l.index < 0 or l.index >= list.len(map)
+        return SarifLogicalRef { index: -1 }
+    SarifLogicalRef { index: map[l.index] }
+
+// A rule ref of `b` as a ref of the merged run.
+fn remap_rule(r: sarifref.SarifRuleRef, maps: [[sarifref.SarifRuleRef]]) -> sarifref.SarifRuleRef
+    if r.index < 0 or r.component < 0 or r.component >= list.len(maps)
+        return sarifref.no_rule()
+    let component_map = maps[r.component]
+    if r.index >= list.len(component_map)
+        return sarifref.no_rule()
+    component_map[r.index]
+
+// A location of `b` as a location of the merged run.
+fn remap_location(l: sarifresult.SarifLocation, art_map: [Int],
+                  log_map: [Int]) -> sarifresult.SarifLocation
+    let place = SarifPhysical { artifact: remap_artifact(l.physical.artifact, art_map),
+                                region: l.physical.region,
+                                context_region: l.physical.context_region }
+    SarifLocation { physical: place, logical: remap_logical(l.logical, log_map),
+                    message: l.message }
+
+// The fixes of `b` as fixes of the merged run.  A fix names artifacts
+// and regions and nothing else, so the artifact map is the whole of it.
+fn remap_fixes(fs: [sarifresult.SarifFix], art_map: [Int]) -> [sarifresult.SarifFix]
+    var out: [sarifresult.SarifFix] = []
+    for f in fs
+        var changes: [sarifresult.SarifChange] = []
+        for c in f.changes
+            changes = list.push(changes, SarifChange { artifact: remap_artifact(c.artifact, art_map),
+                                                       replacements: c.replacements })
+        out = list.push(out, SarifFix { description: f.description, changes: changes })
+    out
+
+// The suppressions of `b` as suppressions of the merged run: their
+// location is a location.
+fn remap_suppressions(ss: [sarifresult.SarifSuppression], art_map: [Int],
+                      log_map: [Int]) -> [sarifresult.SarifSuppression]
+    var out: [sarifresult.SarifSuppression] = []
+    for s in ss
+        out = list.push(out, SarifSuppression { kind: s.kind, status: s.status,
+                                                justification: s.justification,
+                                                location: remap_location(s.location, art_map,
+                                                                         log_map) })
+    out
+
+// A result of `b` as a result of the merged run.
+//
+// Every ref inside it is rewritten — the rule, each location's artifact
+// and logical location, each related location, each code-flow step,
+// each fix's changes, each suppression's location — which is the whole
+// reason a merge is a published call rather than a caller's list
+// append.
+fn remap_result(r: sarifresult.SarifResult, art_map: [Int], log_map: [Int],
+                rule_maps: [[sarifref.SarifRuleRef]]) -> sarifresult.SarifResult
+    var locs: [sarifresult.SarifLocation] = list.map(r.locations, l => remap_location(l, art_map, log_map))
+    var related: [sarifresult.SarifLocation] = list.map(r.related_locations, l => remap_location(l, art_map, log_map))
+    var flows: [sarifresult.SarifCodeFlow] = []
+    for flow in r.code_flows
+        var threads: [sarifresult.SarifThreadFlow] = []
+        for t in flow.thread_flows
+            var steps: [sarifresult.SarifFlowStep] = []
+            for step in t.locations
+                steps = list.push(steps, SarifFlowStep {
+                    location: remap_location(step.location, art_map, log_map),
+                    execution_order: step.execution_order,
+                    nesting_level: step.nesting_level,
+                    importance: step.importance })
+            threads = list.push(threads, SarifThreadFlow { id: t.id, message: t.message,
+                                                           locations: steps })
+        flows = list.push(flows, SarifCodeFlow { message: flow.message,
+                                                 thread_flows: threads })
+    SarifResult { rule: remap_rule(r.rule, rule_maps), rule_id: r.rule_id, kind: r.kind,
+                  level: r.level, message: r.message, message_markdown: r.message_markdown,
+                  locations: locs, related_locations: related, code_flows: flows,
+                  fixes: remap_fixes(r.fixes, art_map),
+                  suppressions: remap_suppressions(r.suppressions, art_map, log_map),
+                  baseline: r.baseline, fingerprints: r.fingerprints,
+                  properties: r.properties }
+
+// ── Merging ──────────────────────────────────────────────────────────
 
 // Two runs of the same tool as one.
 //
@@ -264,17 +766,50 @@ pub fn log_of(runs: [sarifrun.SarifRun]) -> sarifrun.SarifLog []
 //
 // The two runs' rules are matched by identifier: two declarations of
 // `E2004` become one rule, and the first one's descriptions win, which
-// is the same precedence `rule` uses.
+// is the same precedence `rule` uses.  Artifacts the first run already
+// has keep its own entry, metadata and all.
 pub fn merge(a: sarifrun.SarifRun, b: sarifrun.SarifRun) -> sarifrun.SarifRun []
-    todo("sarif-nv.sarifbuild.merge")
+    // `a`'s tables are taken over as they stand, so `a`'s own refs stay
+    // correct; everything of `b`'s is interned afresh and its results
+    // are rewritten to point at what they were interned into.
+    var bld = SarifBuilder { tool: a.tool, artifacts: a.artifacts,
+                             logical_locations: a.logical_locations, results: a.results,
+                             invocations: a.invocations, uri_base_ids: a.uri_base_ids,
+                             properties: a.properties }
+    bld = merge_tool(bld, b.tool)
+    let art_map = intern_artifacts(bld, b.artifacts)
+    bld = art_map.0
+    let loc_map = intern_logicals(bld, b.logical_locations)
+    bld = loc_map.0
+    let rule_maps = intern_rules(bld, b.tool)
+    bld = rule_maps.0
+    var results = bld.results[:]
+    list.append(results, list.map(b.results, res => remap_result(res, art_map.1, loc_map.1, rule_maps.1)))
+    var invs = bld.invocations[:]
+    list.append(invs, list.map(b.invocations, inv => inv))
+    var bases = bld.uri_base_ids[:]
+    for base in b.uri_base_ids
+        if find_uri_base(bases, base.id) < 0
+            bases = list.push(bases, base)
+    var props = bld.properties[:]
+    for p in b.properties
+        props = sarifref.with_property(props, p.name, p.value)
+    SarifRun { tool: bld.tool, artifacts: bld.artifacts,
+               logical_locations: bld.logical_locations, results: results,
+               invocations: invs, uri_base_ids: bases, properties: props }
+
+// ── Counting ─────────────────────────────────────────────────────────
 
 // How many artifacts the builder has interned.
 //
 // The number a test asserts to show that interning happened: ten
 // results over two files answer 2.
 pub fn artifact_count(b: SarifBuilder) -> Int []
-    todo("sarif-nv.sarifbuild.artifact_count")
+    list.len(b.artifacts)
 
 // How many rules the builder has interned, across every component.
 pub fn rule_count(b: SarifBuilder) -> Int []
-    todo("sarif-nv.sarifbuild.rule_count")
+    var total = list.len(b.tool.driver.rules)
+    for ext in b.tool.extensions
+        total = total + list.len(ext.rules)
+    total

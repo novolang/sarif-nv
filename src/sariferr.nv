@@ -1,8 +1,6 @@
 // sariferr.nv — what reading a log refuses, and the checks a written
 // one should pass first.
 //
-// Every body here is a `todo()`; the signatures are the design.
-//
 // TWO DIFFERENT THINGS LIVE HERE AND THE DIFFERENCE IS THE POINT.
 //
 // `SarifError` is a REFUSAL: the bytes handed to `sarifjson.read` are
@@ -49,6 +47,27 @@ pub enum SarifError
     // service and is therefore input from outside.
     SarifTooDeep(pointer: Str, limit: Int)
 
+// The sentence a refusal is: what was wrong, and the value that showed
+// it.  The pointer is in `error_pointer` and not in the sentence, so a
+// caller renders it in its own diagnostic shape.
+//
+// A reader here and the `message` the `Error` impl publishes from it,
+// because `render` needs the sentence too and a method of a trait is
+// reached through the trait.
+fn fault_message(e: SarifError) -> Str
+    match e
+        SarifNotJson(why)                          => "the text is not JSON: " + why
+        SarifBadShape(pointer, want, got)          =>
+            "${want} expected at ${pointer}, found ${got}"
+        SarifWrongVersion(found)                   =>
+            "this is not a SARIF 2.1.0 log; its version says ${found}"
+        SarifIndexOutOfRange(pointer, index, size) =>
+            "the index ${index} at ${pointer} is outside a table of ${size}"
+        SarifUnknownEnum(pointer, field, value)    =>
+            "${field} is ${value} at ${pointer}, which is not a spelling the format defines"
+        SarifTooDeep(pointer, limit)               =>
+            "the document nests deeper than ${limit} levels at ${pointer}"
+
 // `SarifError` is an `Error`, which is what lets
 // `Result<SarifLog, SarifError>` exist at all (SPEC § 3.4).
 impl Error for SarifError
@@ -56,7 +75,7 @@ impl Error for SarifError
     // state.  The pointer is in the value and not in the sentence, so a
     // caller renders it in its own diagnostic shape.
     fn message(self) -> Str
-        todo("sarif-nv.SarifError.message")
+        fault_message(self)
 
 // Something wrong with a log that parsed.
 //
@@ -99,7 +118,23 @@ pub enum SarifProblem
 
 // A one-line message for a problem.
 pub fn problem_message(p: SarifProblem) -> Str []
-    todo("sarif-nv.sariferr.problem_message")
+    match p
+        SarifRuleIdMismatch(i, id, indexed_id)     =>
+            "result ${i}: ruleId \"${id}\" and the rule at its index, \"${indexed_id}\", are two rules"
+        SarifLevelForKind(i, kind, level)          =>
+            "result ${i}: kind \"${kind}\" carries level \"${level}\", and a level other than none means something only for a fail"
+        SarifUnboundedFix(i, f)                    =>
+            "result ${i}: fix ${f} replaces a region that says nothing, so applying it replaces the whole artifact"
+        SarifDuplicateArtifact(first, second, uri) =>
+            "artifacts ${first} and ${second} are two spellings of ${uri}"
+        SarifDuplicateRule(first, second, id)      =>
+            "rule \"${id}\" is declared at ${first} and again at ${second}"
+        SarifRegionDisagrees(i, l)                 =>
+            "result ${i}: location ${l} carries a text position and a character offset that cannot both be right"
+        SarifBadTimestamp(pointer, value)          =>
+            "the timestamp \"${value}\" at ${pointer} is not SARIF's RFC 3339 profile"
+        SarifOrphanArtifact(i, uri)                =>
+            "artifact ${i} (${uri}) is pointed at by no result"
 
 // Whether a problem would make a consumer report the wrong thing, as
 // opposed to merely being untidy.
@@ -109,12 +144,30 @@ pub fn problem_message(p: SarifProblem) -> Str []
 // and the orphan.  The split a caller uses to decide whether to refuse
 // a log or to log a warning about it.
 pub fn problem_is_serious(p: SarifProblem) -> Bool []
-    todo("sarif-nv.sariferr.problem_is_serious")
+    match p
+        SarifRuleIdMismatch(_, _, _)    => true
+        SarifLevelForKind(_, _, _)      => true
+        SarifUnboundedFix(_, _)         => true
+        SarifRegionDisagrees(_, _)      => true
+        // A timestamp outside the profile is a log a build service
+        // refuses, which is worse than untidy and is not a wrong
+        // report either — the one variant the sentence above does not
+        // name, and it is not serious for the reason the others are.
+        SarifBadTimestamp(_, _)         => true
+        SarifDuplicateArtifact(_, _, _) => false
+        SarifDuplicateRule(_, _, _)     => false
+        SarifOrphanArtifact(_, _)       => false
 
 // The JSON Pointer of the place an error refers to, or the empty
 // string.
 pub fn error_pointer(e: SarifError) -> Str []
-    todo("sarif-nv.sariferr.error_pointer")
+    match e
+        SarifNotJson(_)               => ""
+        SarifWrongVersion(_)          => ""
+        SarifBadShape(p, _, _)        => p
+        SarifIndexOutOfRange(p, _, _) => p
+        SarifUnknownEnum(p, _, _)     => p
+        SarifTooDeep(p, _)            => p
 
 // `<file>: <message>`, or `<file>#<pointer>: <message>` when there is a
 // pointer.
@@ -128,4 +181,7 @@ pub fn error_pointer(e: SarifError) -> Str []
 //     println(sariferr.render(SarifWrongVersion("1.0.0"), "out.sarif"))
 // ```
 pub fn render(e: SarifError, file: Str) -> Str []
-    todo("sarif-nv.sariferr.render")
+    let pointer = error_pointer(e)
+    if pointer == ""
+        return file + ": " + fault_message(e)
+    file + "#" + pointer + ": " + fault_message(e)
